@@ -1,0 +1,3354 @@
+C-----------------------------------------------------------------------
+      PROGRAM IGB
+C$$$  MAIN PROGRAM DOCUMENTATION BLOCK
+C
+C MAIN PROGRAM:  IGB         TRANSFORM SIGMA TO ISENTROPIC GRIB
+C   PRGMMR: IREDELL          ORG: W/NMC23     DATE: 92-10-31
+C
+C ABSTRACT: PROGRAM TRANSFORMS SIGMA INPUT TO ISENTROPIC GRIB OUTPUT.
+C   THE OUTPUT CONSISTS OF DATA ON A GAUSSIAN GRID.
+C   TEMPERATURE, WIND COMPONENTS, VERTICAL VELOCITY, RELATIVE HUMIDITY,
+C   MONTGOMERY POTENTIAL, STATIC STABILITY AND POTENTIAL VORTICITY
+C   AS WELL AS SURFACE POTENTIAL TEMPERATURE ARE OUTPUT.
+C   FIRST NAMIGB NAMELIST IS READ TO DETERMINE OUTPUT FORMAT.
+C   THEN A SIGMA (GRID OR SPECTRAL) FILE IS READ FROM UNIT 11 AND
+C   THE PROGRAM PRODUCES AND WRITES A ISENTROPIC GRIB1 FILE TO UNIT 51.
+C   THEN A SIGMA FILE IS READ FROM UNIT 12 AND
+C   THE PROGRAM PRODUCES AND WRITES A ISENTROPIC GRIB1 FILE TO UNIT 52.
+C   THE PROGRAM CONTINUES UNTIL AN EMPTY INPUT FILE IS ENCOUNTERED.
+C
+C PROGRAM HISTORY LOG:
+C   92-10-31  IREDELL
+C
+C NAMELISTS:
+C   NAMIGB:      PARAMETERS DETERMINING OUTPUT FORMAT
+C     IO         NUMBER OF LONGITUDE POINTS (DEFAULT: SET BY IJKDEF)
+C     JO         NUMBER OF LATITUDE POINTS (DEFAULT: SET BY IJKDEF)
+C     KO         NUMBER OF ISENTROPIC LEVELS (DEFAULT: 11)
+C     THO(KO)    POTENTIAL TEMPERATURES IN K (DEFAULT: ECMWF LEVELS)
+C     ICEN       FORECAST CENTER IDENTIFIER (DEFAULT: 7)
+C     ICEN2      FORECAST SUB-CENTER IDENTIFIER (DEFAULT: 0)
+C     IGEN       MODEL GENERATING CODE (DEFAULT: FROM SIGMA FILE)
+C
+C INPUT FILES:
+C   UNIT   11-?  SIGMA FILE(S)
+C
+C OUTPUT FILES:
+C   UNIT   51-?  ISENTROPIC GRIB1 FILE(S)
+C
+C SUBPROGRAMS CALLED:
+C   IDSDEF       SET DEFAULTS FOR DECIMAL SCALING
+C   GPVS         COMPUTE SATURATED VAPOR PRESSURE TABLE
+C   RDSGH        READ A SIGMA FILE HEADER
+C   IGB1         TRANSFORM ONE SIGMA FILE TO PRESSURE GRIB
+C
+C ATTRIBUTES:
+C   LANGUAGE: CRAY FORTRAN
+C
+C$$$
+      PARAMETER(LEVMAX=100,KOMAX=100)
+      DIMENSION IDATE(4)
+      DIMENSION SI(LEVMAX+1),SL(LEVMAX)
+      DIMENSION THO(KOMAX)
+      DIMENSION IDS(255)
+      character igbnam*7
+      NAMELIST/NAMIGB/ IO,JO,KO,THO,IDS,ICEN,ICEN2,IGEN
+      DATA IO/0/,JO/0/,KO/11/
+      DATA THO/270.,280.,290.,300.,315.,330.,350.,400.,450.,550.,650.,
+     1	89*0.0/
+      DATA NCPUS/1/,MXBIT/16/
+      DATA IDS/255*0/
+      DATA ICEN/7/,ICEN2/0/,IGEN/0/
+C - - - - - - - - - - - - - - - - - - - - - - - - - - - - - - - - - - -
+C  SET DEFAULTS AND READ NAMELIST
+c     CALL W3LOG('$S','$M')
+	write(*,*) '>>igb'
+      CALL IDSDEF(2,IDS)
+      READ(*,NAMIGB,END=5)
+5     CONTINUE
+      CALL GPVS
+      NSIG=10
+      NIGB=50
+C - - - - - - - - - - - - - - - - - - - - - - - - - - - - - - - - - - -
+C  READ FIRST SIGMA HEADER RECORD
+      NSIG=NSIG+1
+	write(*,*) '>>rdsgh'
+      CALL RDSGH(NSIG,FHOUR,IDATE,SI,SL,
+     &           JCAP,LEVS,ITRUN,IORDER,IREALF,IGEN1,
+     &           LATB2,LONB2,LONB22,NFLDS,NWHDR,NWFLD,
+     &           NC,NCTOP,IRET)
+C - - - - - - - - - - - - - - - - - - - - - - - - - - - - - - - - - - -
+C  TRANSFORM TO ISENTROPIC GRIB AND ATTEMPT TO READ NEXT SIGMA HEADER
+      DOWHILE(IRET.EQ.0)
+        NIGB=NIGB+1
+        IF(IGEN.EQ.0) IGEN=IGEN1
+        CALL IJKDEF(JCAP,LEVS,IO,JO,KO)
+        IYMDH=IDATE(4)*1000000+IDATE(2)*10000+IDATE(3)*100+IDATE(1)
+        PRINT *,' POSTING DATE ',IYMDH,'+',NINT(FHOUR),
+     &          '   SIGMA SPECTRAL T',JCAP,' L',LEVS,
+     &          '   ISENTROPIC GRID ',IO,'*',JO,'*',KO
+
+c       write(igbnam,'(a,i2)') 'fort.', nigb
+c       call baopen(nigb,trim(igbnam),iret)
+
+	write(*,*) '>>igb1'
+        CALL IGB1(FHOUR,IDATE,
+     &            NSIG,JCAP,NC,NCTOP,LEVS,NFLDS,SI,SL,
+     &            IO,JO,KO,THO,
+     &            NIGB,NCPUS,MXBIT,IDS,
+     &            ICEN,ICEN2,IGEN)
+	write(*,*) '<<igb1'
+        CLOSE(NSIG)
+        CLOSE(NIGB)
+        NSIG=NSIG+1
+	write(*,*) '>>rdsgh'
+        CALL RDSGH(NSIG,FHOUR,IDATE,SI,SL,
+     &             JCAP,LEVS,ITRUN,IORDER,IREALF,IGEN1,
+     &             LATB2,LONB2,LONB22,NFLDS,NWHDR,NWFLD,
+     &             NC,NCTOP,IRET)
+      ENDDO
+C - - - - - - - - - - - - - - - - - - - - - - - - - - - - - - - - - - -
+c     CALL W3LOG('$E')
+      STOP
+      END
+C-----------------------------------------------------------------------
+      SUBROUTINE IGB1(FHOUR,IDATE,
+     &                NSIG,JCAP,NC,NCTOP,LEVS,NFLDS,SI,SL,
+     &                IO,JO,KO,THO,
+     &                NIGB,NCPUS,MXBIT,IDS,
+     &                ICEN,ICEN2,IGEN)
+C$$$  SUBPROGRAM DOCUMENTATION BLOCK
+C
+C SUBPROGRAM: IGB1           TRANSFORMS SIGMA TO ISENTROPIC GRIB
+C   PRGMMR: IREDELL          ORG: W/NMC23     DATE: 92-10-31
+C
+C ABSTRACT: TRANSFORMS A SIGMA SPECTRAL FILE TO ISENTROPIC GRIB1.
+C   ONE LATITUDE SLICE AT A TIME, FIRST SIGMA GRID DATA
+C   IS TRANSFORMED FROM SIGMA SPECTRAL COEFFICIENTS.
+C   THE INPUT DATA CONSISTS OF VORTICITY, DIVERGENCE, WIND COMPONENTS,
+C   TEMPERATURE AND SPECIFIC HUMIDITY ON THE SIGMA SURFACES AS WELL AS
+C   SURFACE PRESSURE AND OROGRAPHY AND THEIR HORIZONTAL GRADIENTS.
+C   VERTICAL VELOCITY, RELATIVE HUMIDITY AND GEOPOTENTIAL HEIGHTS
+C   AS WELL AS THE SQUARE OF THE BRUNT-VAISALA FREQUENCY
+C   ARE COMPUTED ON THE SIGMA SURFACES AND THEN INTERPOLATED TO
+C   ISENTROPIC SURFACES ALONG WITH WIND AND TEMPERATURE.
+C   THE MONTGOMERY POTENTIAL IS COMPUTED THERE ALSO.
+C   THEN THE POTENTIAL VORTICITY IS COMPUTED SPECTRALLY THERE.
+C   TEMPERATURE, WINDS, RELATIVE HUMIDITY, MONTGOMERY POTENTIAL,
+C   STATIC STABILITY AND POTENTIAL VORTICITY ON ISENTROPIC SURFACES
+C   AS WELL AS SURFACE POTENTIAL TEMPERATURE ARE OUTPUT.
+C   THE OUTPUT DATA IS TRANSPOSED AND ROUNDED
+C   AND PACKED INTO GRIB MESSAGES AND WRITTEN TO THE GRIB FILE.
+C
+C PROGRAM HISTORY LOG:
+C   92-10-31  IREDELL
+C
+C USAGE:    CALL IGB1(FHOUR,IDATE,
+C    &                NSIG,JCAP,NC,NCTOP,LEVS,NFLDS,SI,SL,
+C    &                IO,JO,KO,THO,
+C    &                NIGB,NCPUS,MXBIT,IDS,
+C    &                ICEN,ICEN2,IGEN)
+C   INPUT ARGUMENTS:
+C     FHOUR        REAL FORECAST HOUR
+C     IDATE        INTEGER (4) DATE
+C     NSIG         INTEGER UNIT FROM WHICH TO READ SIGMA FILE
+C     JCAP         INTEGER SPECTRAL TRUNCATION
+C     NC           INTEGER NUMBER OF SPECTRAL COEFFICIENTS
+C     NCTOP        INTEGER NUMBER OF SPECTRAL COEFFICIENTS OVER TOP
+C     LEVS         INTEGER NUMBER OF SIGMA LEVELS
+C     NFLDS        INTEGER TOTAL NUMBER OF INPUT HORIZONTAL FIELDS
+C     SI           REAL (LEVS+1) SIGMA INTERFACE VALUES
+C     SL           REAL (LEVS) SIGMA FULL LEVEL VALUES
+C     IO           INTEGER NUMBER OF OUTPUT LONGITUDES
+C     JO           INTEGER NUMBER OF OUTPUT LATITUDES
+C     KO           INTEGER NUMBER OF OUTPUT ISENTROPIC LEVELS
+C     THO          REAL (KO) POTENTIAL TEMPERATURES IN K
+C     NIGB         INTEGER UNIT TO WHICH TO WRITE GRIB MESSAGES
+C     NCPUS        INTEGER NUMBER OF CPUS OVER WHICH TO DISTRIBUTE WORK
+C     MXBIT        INTEGER MAXIMUM NUMBER OF BITS TO PACK DATA
+C     IDS          INTEGER (255) DECIMAL SCALING
+C     ICEN         INTEGER FORECAST CENTER IDENTIFIER
+C     ICEN2        INTEGER FORECAST SUBCENTER IDENTIFIER
+C     IGEN         INTEGER GENERATING MODEL IDENTIFIER
+C
+C SUBPROGRAMS CALLED:
+C   ISRCHFLT     FIND FIRST VALUE IN AN ARRAY LESS THAN TARGET VALUE
+C   MPFDEF       SET DEFAULTS FOR FIELD PARAMETER IDENTIFIERS
+C   RDSS         READ SIGMA COEFFICIENTS
+C   TRSS         TRANSFORM SIGMA COEFFICIENTS
+C   POTMP        COMPUTE POTENTIAL TEMPERATURE
+C   OMEGA        COMPUTE VERTICAL VELOCITY
+C   GETRH        COMPUTE RELATIVE HUMIDITY
+C   BVFSQ        COMPUTE STATIC STABILITIES
+C   HYDRO        COMPUTE GEOPOTENTIAL HEIGHTS
+C   SIG2I        INTERPOLATE SIGMA TO ISENTROPIC
+C   MONTP        COMPUTE MONTGOMERY POTENTIAL
+C   LLIPV        COMPUTE POTENTIAL VORTICITY
+C   ROWSEP       SEPARATE HEMISPHERIC ROWS ON GRID
+C   GRIBIT       CREATE GRIB MESSAGE
+C   WRYTE        WRITE DATA BY BYTES
+C
+C ATTRIBUTES:
+C   LANGUAGE: CRAY FORTRAN
+C
+C$$$
+      DIMENSION IDATE(4),SI(LEVS+1),SL(LEVS),THO(KO)
+      DIMENSION IDS(255)
+      PARAMETER(NUPA=8,NSFC=1)
+      DIMENSION TRIG(2*IO),IFAX(20),EPS(NC/2),EPSTOP(NCTOP/2)
+      DIMENSION SS(NC,NFLDS),SSTOP(NCTOP,NFLDS)
+      DIMENSION CLAT((JO+1)/2),SLAT((JO+1)/2),WLAT((JO+1)/2)
+      DIMENSION FXS(2*IO+6,NFLDS)
+      DIMENSION OXS(2*IO+6,LEVS),RXS(2*IO+6,LEVS),SXS(2*IO+6,LEVS)
+      DIMENSION ZXS(2*IO+6,LEVS),ZXSI(2*IO+6,LEVS)
+      DIMENSION FXI(2*IO+6,NUPA*KO+NSFC)
+      DIMENSION IBM(NUPA*KO+NSFC)
+      DIMENSION IXI(KO,(JO+1)/2),LXI(2*IO+6,KO)
+      LOGICAL LXI,LXY
+      DIMENSION ZXI(2*IO+6,KO)
+      DIMENSION FXY(2*IO,(JO+1)/2,NUPA*KO+NSFC)
+      DIMENSION LXY(2*IO,(JO+1)/2,NUPA*KO+NSFC)
+      DIMENSION LGRIB(NCPUS)
+      DIMENSION IPU(NUPA*KO+NSFC),ITL(NUPA*KO+NSFC)
+      DIMENSION IL1(NUPA*KO+NSFC),IL2(NUPA*KO+NSFC)
+      DIMENSION MPF(255)
+      CHARACTER GRIB(200+IO*JO*(MXBIT+1)/8,NCPUS)*1
+      PARAMETER(IPUT=11,IPUU=33,IPUV=34,IPUO=39,IPURH=52,
+     &          IPUMP=37,IPUSS=138,IPUPV=149,IPUTH=13)
+      PARAMETER(ITLI=113,ITLSFC=1)
+C - - - - - - - - - - - - - - - - - - - - - - - - - - - - - - - - - - -
+C  READ SIGMA SPECTRAL DATA
+      JFHOUR=NINT(FHOUR)
+      IO2=2*IO
+      IO22=2*IO+6
+      JO2=(JO+1)/2
+	write(*,*) '>>rdss'
+      CALL RDSS(NSIG,JCAP,NC,NCTOP,JO2,IO2,LEVS,SL,
+     &          CLAT,SLAT,WLAT,TRIG,IFAX,EPS,EPSTOP,SS,SSTOP)
+C - - - - - - - - - - - - - - - - - - - - - - - - - - - - - - - - - - -
+C  SET BOTH INPUT AND OUTPUT INDICES
+      KSZ=1
+      KSD=LEVS+1
+      KST=2*LEVS+1
+      KSQ=3*LEVS+1
+      KSPSX=4*LEVS+1
+      KSPSY=4*LEVS+2
+      KSU=4*LEVS+3
+      KSV=5*LEVS+3
+      KSPS=6*LEVS+3
+      KSZS=6*LEVS+4
+      KSZSX=6*LEVS+5
+      KSZSY=6*LEVS+6
+      NFLDI=NUPA*KO+NSFC
+      KITH=1
+      KIT=2
+      KIU=KO+2
+      KIV=2*KO+2
+      KIO=3*KO+2
+      KIRH=4*KO+2
+      KIMP=5*KO+2
+      KISS=6*KO+2
+      KIPV=7*KO+2
+C - - - - - - - - - - - - - - - - - - - - - - - - - - - - - - - - - - -
+C  SET SOME GRIB PARAMETERS
+c     IPU(KIT:KIT+KO-1)=IPUT
+c     IPU(KIU:KIU+KO-1)=IPUU
+c     IPU(KIV:KIV+KO-1)=IPUV
+c     IPU(KIO:KIO+KO-1)=IPUO
+c     IPU(KIRH:KIRH+KO-1)=IPURH
+c     IPU(KIMP:KIMP+KO-1)=IPUMP
+c     IPU(KISS:KISS+KO-1)=IPUSS
+c     IPU(KIPV:KIPV+KO-1)=IPUPV
+	do i = 1, ko
+	    IPU(KIT+i-1)=IPUT
+	    IPU(KIU+i-1)=IPUU
+	    IPU(KIV+i-1)=IPUV
+	    IPU(KIO+i-1)=IPUO
+	    IPU(KIRH+i-1)=IPURH
+	    IPU(KIMP+i-1)=IPUMP
+	    IPU(KISS+i-1)=IPUSS
+	    IPU(KIPV+i-1)=IPUPV
+	enddo
+
+      IPU(KITH)=IPUTH
+
+c     ITL(KIT:KIT+KO-1)=ITLI
+c     ITL(KIU:KIU+KO-1)=ITLI
+c     ITL(KIV:KIV+KO-1)=ITLI
+c     ITL(KIO:KIO+KO-1)=ITLI
+c     ITL(KIRH:KIRH+KO-1)=ITLI
+c     ITL(KIMP:KIMP+KO-1)=ITLI
+c     ITL(KISS:KISS+KO-1)=ITLI
+c     ITL(KIPV:KIPV+KO-1)=ITLI
+
+	do i = 1, ko
+           ITL(KIT+i-1)=ITLI
+           ITL(KIU+i-1)=ITLI
+           ITL(KIV+i-1)=ITLI
+           ITL(KIO+i-1)=ITLI
+           ITL(KIRH+i-1)=ITLI
+           ITL(KIMP+i-1)=ITLI
+           ITL(KISS+i-1)=ITLI
+           ITL(KIPV+i-1)=ITLI
+	enddo
+
+      ITL(KITH)=ITLSFC
+c     IL1(:)=0
+	write(*,*) '>>ifill,il1'
+      call ifill(IL1,NUPA*KO+NSFC,0)
+
+c     IL2(KIT:KIT+KO-1)=NINT(THO)
+c     IL2(KIU:KIU+KO-1)=NINT(THO)
+c     IL2(KIV:KIV+KO-1)=NINT(THO)
+c     IL2(KIO:KIO+KO-1)=NINT(THO)
+c     IL2(KIRH:KIRH+KO-1)=NINT(THO)
+c     IL2(KIMP:KIMP+KO-1)=NINT(THO)
+c     IL2(KISS:KISS+KO-1)=NINT(THO)
+c     IL2(KIPV:KIPV+KO-1)=NINT(THO)
+
+	do i = 1, ko
+           IL2(KIT+i-1)=NINT(tho(i))
+           IL2(KIU+i-1)=NINT(tho(i))
+           IL2(KIV+i-1)=NINT(tho(i))
+           IL2(KIO+i-1)=NINT(tho(i))
+           IL2(KIRH+i-1)=NINT(tho(i))
+           IL2(KIMP+i-1)=NINT(tho(i))
+           IL2(KISS+i-1)=NINT(tho(i))
+           IL2(KIPV+i-1)=NINT(tho(i))
+	enddo
+
+      IL2(KITH)=0
+	write(*,*) '>>mpfdef'
+      CALL MPFDEF(2,MPF)
+C - - - - - - - - - - - - - - - - - - - - - - - - - - - - - - - - - - -
+C  LOOP OVER GROUPS OF LATITUDES
+      DO J1=1,JO2,NCPUS
+        J2=MIN(J1+NCPUS-1,JO2)
+C  COMPUTE AUXILIARY QUANTITIES ON SIGMA AND INTERPOLATE TO ISENTROPIC.
+C  PACK FOR TRANSPOSE SOME QUANTITIES.
+C  TRANSFORM SOME QUANTITIES TO SPECTRAL SPACE TO TAKE DERIVATIVES.
+        DO J=J1,J2
+          CALL TRSS(JCAP,NC,NCTOP,LEVS,TRIG,IFAX,EPS,EPSTOP,SS,SSTOP,
+     &              IO2,IO22,CLAT(J),SLAT(J),FXS)
+          CALL POTMP(IO2,IO22,1,SL,
+     &               FXS(1,KSPS),FXS(1,KST),
+     &               FXI(1,KITH))
+          CALL OMEGA(IO2,IO22,LEVS,SI,SL,
+     &               FXS(1,KSPS),FXS(1,KSPSX),FXS(1,KSPSY),
+     &               FXS(1,KSD),FXS(1,KSU),FXS(1,KSV),
+     &               OXS)
+          CALL GETRH(IO2,IO22,LEVS,SL,
+     &               FXS(1,KSPS),FXS(1,KSQ),FXS(1,KST),
+     &               RXS)
+          CALL BVFSQ(IO2,IO22,LEVS,SL,
+     &               FXS(1,KSPS),FXS(1,KST),
+     &               SXS)
+          CALL HYDRO(IO2,IO22,LEVS,SI,SL,
+     &               FXS(1,KSZS),FXS(1,KST),FXS(1,KSQ),
+     &               ZXS,ZXSI)
+	write(*,*) '>>sig2i'
+          CALL SIG2I(IO2,IO22,LEVS,SL,FXS(1,KSPS),
+     &               FXS(1,KST),FXS(1,KSU),FXS(1,KSV),
+     &               OXS,RXS,SXS,ZXS,
+     &               KO,THO,
+     &               FXI(1,KIT),FXI(1,KIU),FXI(1,KIV),FXI(1,KIO),
+     &               FXI(1,KIRH),FXI(1,KISS),ZXI,IXI(1,J),LXI)
+	write(*,*) '>>montp'
+          CALL MONTP(IO2,IO22,KO,FXI(1,KIT),ZXI,FXI(1,KIMP))
+          DO K=1,KO
+            DO I=1,IO2
+              LXY(I,J,KIT+K-1)=LXI(I,K)
+              LXY(I,J,KIU+K-1)=LXI(I,K)
+              LXY(I,J,KIV+K-1)=LXI(I,K)
+              LXY(I,J,KIO+K-1)=LXI(I,K)
+              LXY(I,J,KIRH+K-1)=LXI(I,K)
+              LXY(I,J,KIMP+K-1)=LXI(I,K)
+              LXY(I,J,KISS+K-1)=LXI(I,K)
+              LXY(I,J,KIPV+K-1)=LXI(I,K)
+              FXY(I,J,KIT+K-1)=FXI(I,KIT+K-1)
+              FXY(I,J,KIU+K-1)=FXI(I,KIU+K-1)
+              FXY(I,J,KIV+K-1)=FXI(I,KIV+K-1)
+              FXY(I,J,KIO+K-1)=FXI(I,KIO+K-1)
+              FXY(I,J,KIRH+K-1)=FXI(I,KIRH+K-1)
+              FXY(I,J,KIMP+K-1)=FXI(I,KIMP+K-1)
+              FXY(I,J,KISS+K-1)=FXI(I,KISS+K-1)
+            ENDDO
+          ENDDO
+          DO I=1,IO2
+            LXY(I,J,KITH)=.TRUE.
+            FXY(I,J,KITH)=FXI(I,KITH)
+          ENDDO
+        ENDDO
+      ENDDO
+C - - - - - - - - - - - - - - - - - - - - - - - - - - - - - - - - - - -
+C  DETERMINE BITMAP FLAGS
+	write(*,*) '>>bitmap flags'
+      DO K=1,KO
+        IXY=0
+        DO J=1,JO2
+          IXY=MAX(IXY,IXI(K,J))
+        ENDDO
+        IBM(KIT+K-1)=IXY
+        IBM(KIU+K-1)=IXY
+        IBM(KIV+K-1)=IXY
+        IBM(KIO+K-1)=IXY
+        IBM(KIRH+K-1)=IXY
+        IBM(KIMP+K-1)=IXY
+        IBM(KISS+K-1)=IXY
+        IBM(KIPV+K-1)=IXY
+      ENDDO
+      IBM(KITH)=0
+C - - - - - - - - - - - - - - - - - - - - - - - - - - - - - - - - - - -
+C  COMPUTE POTENTIAL VORTICITY
+        CALL LLIPV(IO2,JO2,KO,JO2-1,CLAT,SLAT,WLAT,TRIG,IFAX,THO,
+     &             FXY(1,1,KIU),FXY(1,1,KIV),FXY(1,1,KIT),
+     &             FXY(1,1,KIMP),FXY(1,1,KISS),FXY(1,1,KIPV))
+C - - - - - - - - - - - - - - - - - - - - - - - - - - - - - - - - - - -
+C  LOOP OVER GROUPS OF HORIZONTAL FIELDS
+      DO K1=1,NFLDI,NCPUS
+        K2=MIN(K1+NCPUS-1,NFLDI)
+C  UNPACK TRANSPOSED FIELDS AND INTERPOLATE TO OUTPUT GRID
+C  AND ROUND TO THE NUMBER OF BITS AND ENGRIB THE FIELD IN PARALLEL
+        DO K=K1,K2
+          KAN=K-K1+1
+          LGRIB(KAN)=0
+          CALL ROWSEP(IO,JO,FXY(1,1,K))
+c         CALL ROWSEP(IO,JO,LXY(1,1,K))
+          CALL ROWSEPl(IO,JO,LXY(1,1,K))
+          CALL GRIBIT(FXY(1,1,K),LXY(1,1,K),0,IO,JO,MXBIT,90.,
+     &                28,2,ICEN,IGEN,IBM(K),
+     &                IPU(K),ITL(K),IL1(K),IL2(K),
+     &                IDATE(4),IDATE(2),IDATE(3),IDATE(1),
+     &                1,JFHOUR,0,10,0,0,ICEN2,IDS(IPU(K)),
+     &                0.,0.,0.,0.,0.,0.,
+     &                GRIB(1,KAN),LGRIB(KAN),IERR)
+        ENDDO
+C  WRITE OUT GRIB MESSAGES SEQUENTIALLY
+        DO K=K1,K2
+          KAN=K-K1+1
+          IF(LGRIB(KAN).GT.0) THEN
+            CALL WRYTE(NIGB,LGRIB(KAN),GRIB(1,KAN))
+            PRINT *,' GRIB1 WRITTEN TO ',NIGB,' OF LENGTH ',LGRIB(KAN)
+          ENDIF
+        ENDDO
+      ENDDO
+C - - - - - - - - - - - - - - - - - - - - - - - - - - - - - - - - - - -
+      RETURN
+      END
+C-----------------------------------------------------------------------
+      SUBROUTINE IDSDEF(IPTV,IDS)
+C$$$  SUBPROGRAM DOCUMENTATION BLOCK
+C
+C SUBPROGRAM: IDSDEF         SETS DEFAULT DECIMAL SCALINGS
+C   PRGMMR: IREDELL          ORG: W/NMC23     DATE: 92-10-31
+C
+C ABSTRACT: SETS DECIMAL SCALINGS DEFAULTS FOR VARIOUS PARAMETERS.
+C   A DECIMAL SCALING OF -3 MEANS DATA IS PACKED IN KILO-SI UNITS.
+C
+C PROGRAM HISTORY LOG:
+C   92-10-31  IREDELL
+C
+C USAGE:    CALL IDSDEF(IPTV,IDS)
+C   INPUT ARGUMENTS:
+C     IPTV         PARAMTER TABLE VERSION (ONLY 1 OR 2 IS RECOGNIZED)
+C   OUTPUT ARGUMENTS:
+C     IDS          INTEGER (255) DECIMAL SCALINGS
+C                  (UNKNOWN DECIMAL SCALINGS WILL NOT BE SET)
+C
+C ATTRIBUTES:
+C   LANGUAGE: CRAY FORTRAN
+C
+C$$$
+      DIMENSION IDS(255)
+C - - - - - - - - - - - - - - - - - - - - - - - - - - - - - - - - - - -
+      IF(IPTV.EQ.1.OR.IPTV.EQ.2) THEN
+        IDS(001)=-1     ! PRESSURE (PA)
+        IDS(002)=-1     ! SEA-LEVEL PRESSURE (PA)
+        IDS(003)=5      ! PRESSURE TENDENCY (PA/S)
+                        !
+                        !
+        IDS(006)=-1     ! GEOPOTENTIAL (M2/S2)
+        IDS(007)=0      ! GEOPOTENTIAL HEIGHT (M)
+        IDS(008)=0      ! GEOMETRIC HEIGHT (M)
+        IDS(009)=0      ! STANDARD DEVIATION OF HEIGHT (M)
+                        !
+        IDS(011)=1      ! TEMPERATURE (K)
+        IDS(012)=1      ! VIRTUAL TEMPERATURE (K)
+        IDS(013)=1      ! POTENTIAL TEMPERATURE (K)
+        IDS(014)=1      ! PSEUDO-ADIABATIC POTENTIAL TEMPERATURE (K)
+        IDS(015)=1      ! MAXIMUM TEMPERATURE (K)
+        IDS(016)=1      ! MINIMUM TEMPERATURE (K)
+        IDS(017)=1      ! DEWPOINT TEMPERATURE (K)
+        IDS(018)=1      ! DEWPOINT DEPRESSION (K)
+        IDS(019)=4      ! TEMPERATURE LAPSE RATE (K/M)
+        IDS(020)=0      ! VISIBILITY (M)
+                        ! RADAR SPECTRA 1 ()
+                        ! RADAR SPECTRA 2 ()
+                        ! RADAR SPECTRA 3 ()
+                        !
+        IDS(025)=1      ! TEMPERATURE ANOMALY (K)
+        IDS(026)=-1     ! PRESSURE ANOMALY (PA)
+        IDS(027)=0      ! GEOPOTENTIAL HEIGHT ANOMALY (M)
+                        ! WAVE SPECTRA 1 ()
+                        ! WAVE SPECTRA 2 ()
+                        ! WAVE SPECTRA 3 ()
+        IDS(031)=0      ! WIND DIRECTION (DEGREES)
+        IDS(032)=1      ! WIND SPEED (M/S)
+        IDS(033)=1      ! ZONAL WIND (M/S)
+        IDS(034)=1      ! MERIDIONAL WIND (M/S)
+        IDS(035)=-4     ! STREAMFUNCTION (M2/S)
+        IDS(036)=-4     ! VELOCITY POTENTIAL (M2/S)
+        IDS(037)=-1     ! MONTGOMERY STREAM FUNCTION (M2/S2)
+        IDS(038)=8      ! SIGMA VERTICAL VELOCITY (1/S)
+        IDS(039)=3      ! PRESSURE VERTICAL VELOCITY (PA/S)
+        IDS(040)=4      ! GEOMETRIC VERTICAL VELOCITY (M/S)
+        IDS(041)=6      ! ABSOLUTE VORTICITY (1/S)
+        IDS(042)=6      ! ABSOLUTE DIVERGENCE (1/S)
+        IDS(043)=6      ! RELATIVE VORTICITY (1/S)
+        IDS(044)=6      ! RELATIVE DIVERGENCE (1/S)
+        IDS(045)=4      ! VERTICAL U SHEAR (1/S)
+        IDS(046)=4      ! VERTICAL V SHEAR (1/S)
+        IDS(047)=0      ! DIRECTION OF CURRENT (DEGREES)
+                        ! SPEED OF CURRENT (M/S)
+                        ! U OF CURRENT (M/S)
+                        ! V OF CURRENT (M/S)
+        IDS(051)=4      ! SPECIFIC HUMIDITY (KG/KG)
+        IDS(052)=0      ! RELATIVE HUMIDITY (PERCENT)
+        IDS(053)=4      ! HUMIDITY MIXING RATIO (KG/KG)
+        IDS(054)=1      ! PRECIPITABLE WATER (KG/M2)
+        IDS(055)=-1     ! VAPOR PRESSURE (PA)
+        IDS(056)=-1     ! SATURATION DEFICIT (PA)
+        IDS(057)=1      ! EVAPORATION (KG/M2)
+        IDS(058)=1      ! CLOUD ICE (KG/M2)
+        IDS(059)=6      ! PRECIPITATION RATE (KG/M2/S)
+        IDS(060)=0      ! THUNDERSTORM PROBABILITY (PERCENT)
+        IDS(061)=1      ! TOTAL PRECIPITATION (KG/M2)
+        IDS(062)=1      ! LARGE-SCALE PRECIPITATION (KG/M2)
+        IDS(063)=1      ! CONVECTIVE PRECIPITATION (KG/M2)
+        IDS(064)=6      ! WATER EQUIVALENT SNOWFALL RATE (KG/M2/S)
+        IDS(065)=0      ! WATER EQUIVALENT OF SNOW DEPTH (KG/M2)
+        IDS(066)=2      ! SNOW DEPTH (M)
+                        ! MIXED-LAYER DEPTH (M)
+                        ! TRANSIENT THERMOCLINE DEPTH (M)
+                        ! MAIN THERMOCLINE DEPTH (M)
+                        ! MAIN THERMOCLINE ANOMALY (M)
+        IDS(071)=0      ! TOTAL CLOUD COVER (PERCENT)
+        IDS(072)=0      ! CONVECTIVE CLOUD COVER (PERCENT)
+        IDS(073)=0      ! LOW CLOUD COVER (PERCENT)
+        IDS(074)=0      ! MIDDLE CLOUD COVER (PERCENT)
+        IDS(075)=0      ! HIGH CLOUD COVER (PERCENT)
+        IDS(076)=1      ! CLOUD WATER (KG/M2)
+                        !
+        IDS(078)=1      ! CONVECTIVE SNOW (KG/M2)
+        IDS(079)=1      ! LARGE SCALE SNOW (KG/M2)
+        IDS(080)=1      ! WATER TEMPERATURE (K)
+        IDS(081)=0      ! SEA-LAND MASK ()
+                        ! DEVIATION OF SEA LEVEL FROM MEAN (M)
+        IDS(083)=5      ! ROUGHNESS (M)
+        IDS(084)=1      ! ALBEDO (PERCENT)
+        IDS(085)=1      ! SOIL TEMPERATURE (K)
+        IDS(086)=0      ! SOIL WETNESS (KG/M2)
+        IDS(087)=0      ! VEGETATION (PERCENT)
+                        ! SALINITY (KG/KG)
+        IDS(089)=4      ! DENSITY (KG/M3)
+        IDS(090)=1      ! RUNOFF (KG/M2)
+        IDS(091)=0      ! ICE CONCENTRATION ()
+                        ! ICE THICKNESS (M)
+        IDS(093)=0      ! DIRECTION OF ICE DRIFT (DEGREES)
+                        ! SPEED OF ICE DRIFT (M/S)
+                        ! U OF ICE DRIFT (M/S)
+                        ! V OF ICE DRIFT (M/S)
+                        ! ICE GROWTH (M)
+                        ! ICE DIVERGENCE (1/S)
+        IDS(099)=1      ! SNOW MELT (KG/M2)
+                        ! SIG HEIGHT OF WAVES AND SWELL (M)
+        IDS(101)=0      ! DIRECTION OF WIND WAVES (DEGREES)
+                        ! SIG HEIGHT OF WIND WAVES (M)
+                        ! MEAN PERIOD OF WIND WAVES (S)
+        IDS(104)=0      ! DIRECTION OF SWELL WAVES (DEGREES)
+                        ! SIG HEIGHT OF SWELL WAVES (M)
+                        ! MEAN PERIOD OF SWELL WAVES (S)
+        IDS(107)=0      ! PRIMARY WAVE DIRECTION (DEGREES)
+                        ! PRIMARY WAVE MEAN PERIOD (S)
+        IDS(109)=0      ! SECONDARY WAVE DIRECTION (DEGREES)
+                        ! SECONDARY WAVE MEAN PERIOD (S)
+        IDS(111)=0      ! NET SOLAR RADIATIVE FLUX AT SURFACE (W/M2)
+        IDS(112)=0      ! NET LONGWAVE RADIATIVE FLUX AT SURFACE (W/M2)
+        IDS(113)=0      ! NET SOLAR RADIATIVE FLUX AT TOP (W/M2)
+        IDS(114)=0      ! NET LONGWAVE RADIATIVE FLUX AT TOP (W/M2)
+        IDS(115)=0      ! NET LONGWAVE RADIATIVE FLUX (W/M2)
+        IDS(116)=0      ! NET SOLAR RADIATIVE FLUX (W/M2)
+        IDS(117)=0      ! TOTAL RADIATIVE FLUX (W/M2)
+                        !
+                        !
+                        !
+        IDS(121)=0      ! LATENT HEAT FLUX (W/M2)
+        IDS(122)=0      ! SENSIBLE HEAT FLUX (W/M2)
+        IDS(123)=0      ! BOUNDARY LAYER DISSIPATION (W/M2)
+        IDS(124)=3      ! U WIND STRESS (N/M2)
+        IDS(125)=3      ! V WIND STRESS (N/M2)
+                        ! WIND MIXING ENERGY (J)
+                        ! IMAGE DATA ()
+        IDS(128)=-1     ! MEAN SEA-LEVEL PRESSURE (STDATM) (PA)
+        IDS(129)=-1     ! MEAN SEA-LEVEL PRESSURE (MAPS) (PA)
+        IDS(130)=-1     ! MEAN SEA-LEVEL PRESSURE (ETA) (PA)
+        IDS(131)=1      ! SURFACE LIFTED INDEX (K)
+        IDS(132)=1      ! BEST LIFTED INDEX (K)
+        IDS(133)=1      ! K INDEX (K)
+        IDS(134)=1      ! SWEAT INDEX (K)
+        IDS(135)=10     ! HORIZONTAL MOISTURE DIVERGENCE (KG/KG/S)
+        IDS(136)=4      ! SPEED SHEAR (1/S)
+        IDS(137)=5      ! 3-HR PRESSURE TENDENCY (PA/S)
+        IDS(138)=6      ! BRUNT-VAISALA FREQUENCY SQUARED (1/S2)
+        IDS(139)=11     ! POTENTIAL VORTICITY (MASS-WEIGHTED) (1/S/M)
+        IDS(140)=0      ! RAIN MASK ()
+        IDS(141)=0      ! FREEZING RAIN MASK ()
+        IDS(142)=0      ! ICE PELLETS MASK ()
+        IDS(143)=0      ! SNOW MASK ()
+        IDS(144)=3      ! VOLUMETRIC SOIL MOISTURE CONTENT (FRACTION)
+        IDS(145)=0      ! POTENTIAL EVAPORATION RATE (W/M2)
+        IDS(146)=0      ! CLOUD WORKFUNCTION (J/KG)
+        IDS(147)=3      ! U GRAVITY WAVE STRESS (N/M2)
+        IDS(148)=3      ! V GRAVITY WAVE STRESS (N/M2)
+        IDS(149)=10     ! POTENTIAL VORTICITY (M2/S/KG)
+                        ! COVARIANCE BETWEEN V AND U (M2/S2)
+                        ! COVARIANCE BETWEEN U AND T (K*M/S)
+                        ! COVARIANCE BETWEEN V AND T (K*M/S)
+                        !
+                        !
+        IDS(155)=0      ! GROUND HEAT FLUX (W/M2)
+        IDS(156)=0      ! CONVECTIVE INHIBITION (W/M2)
+        IDS(157)=0      ! CONVECTIVE APE (J/KG)
+        IDS(158)=0      ! TURBULENT KE (J/KG)
+        IDS(159)=-1     ! CONDENSATION PRESSURE OF LIFTED PARCEL (PA)
+        IDS(160)=0      ! CLEAR SKY UPWARD SOLAR FLUX (W/M2)
+        IDS(161)=0      ! CLEAR SKY DOWNWARD SOLAR FLUX (W/M2)
+        IDS(162)=0      ! CLEAR SKY UPWARD LONGWAVE FLUX (W/M2)
+        IDS(163)=0      ! CLEAR SKY DOWNWARD LONGWAVE FLUX (W/M2)
+        IDS(164)=0      ! CLOUD FORCING NET SOLAR FLUX (W/M2)
+        IDS(165)=0      ! CLOUD FORCING NET LONGWAVE FLUX (W/M2)
+        IDS(166)=0      ! VISIBLE BEAM DOWNWARD SOLAR FLUX (W/M2)
+        IDS(167)=0      ! VISIBLE DIFFUSE DOWNWARD SOLAR FLUX (W/M2)
+        IDS(168)=0      ! NEAR IR BEAM DOWNWARD SOLAR FLUX (W/M2)
+        IDS(169)=0      ! NEAR IR DIFFUSE DOWNWARD SOLAR FLUX (W/M2)
+                        !
+                        !
+        IDS(172)=3      ! MOMENTUM FLUX (N/M2)
+        IDS(173)=0      ! MASS POINT MODEL SURFACE ()
+        IDS(174)=0      ! VELOCITY POINT MODEL SURFACE ()
+        IDS(175)=0      ! SIGMA LAYER NUMBER ()
+        IDS(176)=2      ! LATITUDE (DEGREES)
+        IDS(177)=2      ! EAST LONGITUDE (DEGREES)
+                        !
+                        !
+                        !
+        IDS(181)=9      ! X-GRADIENT LOG PRESSURE (1/M)
+        IDS(182)=9      ! Y-GRADIENT LOG PRESSURE (1/M)
+        IDS(183)=5      ! X-GRADIENT HEIGHT (M/M)
+        IDS(184)=5      ! Y-GRADIENT HEIGHT (M/M)
+                        !
+                        !
+                        !
+                        !
+                        !
+                        !
+                        !
+                        !
+                        !
+                        !
+                        !
+                        !
+                        !
+                        !
+                        !
+                        !
+        IDS(201)=0      ! ICE-FREE WATER SURCACE (PERCENT)
+                        !
+                        !
+        IDS(204)=0      ! DOWNWARD SOLAR RADIATIVE FLUX (W/M2)
+        IDS(205)=0      ! DOWNWARD LONGWAVE RADIATIVE FLUX (W/M2)
+                        !
+        IDS(207)=0      ! MOISTURE AVAILABILITY (PERCENT)
+                        ! EXCHANGE COEFFICIENT (KG/M2/S)
+        IDS(209)=0      ! NUMBER OF MIXED LAYER NEXT TO SFC ()
+                        !
+        IDS(211)=0      ! UPWARD SOLAR RADIATIVE FLUX (W/M2)
+        IDS(212)=0      ! UPWARD LONGWAVE RADIATIVE FLUX (W/M2)
+        IDS(213)=0      ! NON-CONVECTIVE CLOUD COVER (PERCENT)
+        IDS(214)=6      ! CONVECTIVE PRECIPITATION RATE (KG/M2/S)
+        IDS(215)=7      ! TOTAL DIABATIC HEATING RATE (K/S)
+        IDS(216)=7      ! TOTAL RADIATIVE HEATING RATE (K/S)
+        IDS(217)=7      ! TOTAL DIABATIC NONRADIATIVE HEATING RATE (K/S)
+        IDS(218)=2      ! PRECIPITATION INDEX (FRACTION)
+        IDS(219)=1      ! STD DEV OF IR T OVER 1X1 DEG AREA (K)
+        IDS(220)=4      ! NATURAL LOG OF SURFACE PRESSURE OVER 1 KPA ()
+                        !
+        IDS(222)=0      ! 5-WAVE GEOPOTENTIAL HEIGHT (M)
+        IDS(223)=1      ! PLANT CANOPY SURFACE WATER (KG/M2)
+                        !
+                        !
+                        ! BLACKADARS MIXING LENGTH (M)
+                        ! ASYMPTOTIC MIXING LENGTH (M)
+        IDS(228)=1      ! POTENTIAL EVAPORATION (KG/M2)
+        IDS(229)=0      ! SNOW PHASE-CHANGE HEAT FLUX (W/M2)
+                        !
+        IDS(231)=3      ! CONVECTIVE CLOUD MASS FLUX (PA/S)
+        IDS(232)=0      ! DOWNWARD TOTAL RADIATION FLUX (W/M2)
+        IDS(233)=0      ! UPWARD TOTAL RADIATION FLUX (W/M2)
+        IDS(224)=1      ! BASEFLOW-GROUNDWATER RUNOFF (KG/M2)
+        IDS(225)=1      ! STORM SURFACE RUNOFF (KG/M2)
+                        !
+                        !
+        IDS(238)=0      ! SNOW COVER (PERCENT)
+        IDS(239)=1      ! SNOW TEMPERATURE (K)
+                        !
+        IDS(241)=7      ! LARGE SCALE CONDENSATION HEATING RATE (K/S)
+        IDS(242)=7      ! DEEP CONVECTIVE HEATING RATE (K/S)
+        IDS(243)=10     ! DEEP CONVECTIVE MOISTENING RATE (KG/KG/S)
+        IDS(244)=7      ! SHALLOW CONVECTIVE HEATING RATE (K/S)
+        IDS(245)=10     ! SHALLOW CONVECTIVE MOISTENING RATE (KG/KG/S)
+        IDS(246)=7      ! VERTICAL DIFFUSION HEATING RATE (KG/KG/S)
+        IDS(247)=7      ! VERTICAL DIFFUSION ZONAL ACCELERATION (M/S/S)
+        IDS(248)=7      ! VERTICAL DIFFUSION MERID ACCELERATION (M/S/S)
+        IDS(249)=10     ! VERTICAL DIFFUSION MOISTENING RATE (KG/KG/S)
+        IDS(250)=7      ! SOLAR RADIATIVE HEATING RATE (K/S)
+        IDS(251)=7      ! LONGWAVE RADIATIVE HEATING RATE (K/S)
+                        ! DRAG COEFFICIENT ()
+                        ! FRICTION VELOCITY (M/S)
+                        ! RICHARDSON NUMBER ()
+                        !
+      ENDIF
+C - - - - - - - - - - - - - - - - - - - - - - - - - - - - - - - - - - -
+      RETURN
+      END
+C-----------------------------------------------------------------------
+      SUBROUTINE MPFDEF(IPTV,MPF)
+C$$$  SUBPROGRAM DOCUMENTATION BLOCK
+C
+C SUBPROGRAM: MPFDEF         SETS DEFAULT POLE VECTOR FLAGS
+C   PRGMMR: IREDELL          ORG: W/NMC23     DATE: 92-10-31
+C
+C ABSTRACT: SETS FIELD IDENTIFIER DEFAULTS FOR VARIOUS PARAMETERS.
+C   A FLAG OF 0 MEANS SCALAR, 1 MEANS VECTOR, AND 2 MEANS FLAG.
+C   THESE IDENTIFIERS ARE USED IN INTERPOLATION.
+C
+C PROGRAM HISTORY LOG:
+C   93-10-21  IREDELL
+C
+C USAGE:    CALL MPFDEF(IPTV,MPF)
+C   INPUT ARGUMENTS:
+C     IPTV         PARAMTER TABLE VERSION (ONLY 1 OR 2 IS RECOGNIZED)
+C   OUTPUT ARGUMENTS:
+C     MPF          INTEGER (255) FIELD PARAMETER IDENTIFIERS
+C
+C ATTRIBUTES:
+C   LANGUAGE: CRAY FORTRAN
+C
+C$$$
+      DIMENSION MPF(255)
+C - - - - - - - - - - - - - - - - - - - - - - - - - - - - - - - - - - -
+c     MPF=0
+	call ifill(mpf,255,0)
+      IF(IPTV.EQ.1.OR.IPTV.EQ.2) THEN
+c       MPF(033:034)=1
+        MPF(33)=1
+        MPF(34)=1
+c       MPF(049:050)=1
+        MPF(49)=1
+        MPF(50)=1
+c       MPF(095:096)=1
+        MPF(095)=1
+        MPF(096)=1
+c       MPF(124:125)=1
+        MPF(124)=1
+        MPF(125)=1
+c       MPF(181:182)=1
+        MPF(181)=1
+        MPF(182)=1
+c       MPF(183:184)=1
+        MPF(183)=1
+        MPF(184)=1
+c       MPF(247:248)=1
+        MPF(247)=1
+        MPF(248)=1
+
+        MPF(081)=2
+        MPF(091)=2
+        MPF(140)=2
+        MPF(141)=2
+        MPF(142)=2
+        MPF(143)=2
+        MPF(173)=2
+        MPF(174)=2
+        MPF(175)=2
+        MPF(209)=2
+      ENDIF
+C - - - - - - - - - - - - - - - - - - - - - - - - - - - - - - - - - - -
+      RETURN
+      END
+C-----------------------------------------------------------------------
+      SUBROUTINE IJKDEF(JCAP,LEVS,IO,JO,KO)
+C$$$  SUBPROGRAM DOCUMENTATION BLOCK
+C
+C SUBPROGRAM: IJKDEF         SETS DEFAULT OUTPUT DIMENSIONS
+C   PRGMMR: IREDELL          ORG: W/NMC23     DATE: 92-10-31
+C
+C ABSTRACT: SETS DEFAULT OUTPUT DIMENSIONS FOR GIVEN INPUT RESOLUTION.
+C
+C PROGRAM HISTORY LOG:
+C   92-10-31  IREDELL
+C
+C USAGE:    CALL IJKDEF(JCAP,LEVS,IO,JO,KO)
+C   INPUT ARGUMENTS:
+C     JCAP         INTEGER INPUT SPECTRAL TRUCATION (62 OR 126)
+C     LEVS         INTEGER INPUT NUMBER OF SIGMA LEVELS (18 OR 28)
+C     IO           INTEGER DEFAULTED ONLY IF 0
+C     JO           INTEGER DEFAULTED ONLY IF 0
+C     KO           INTEGER DEFAULTED ONLY IF 0
+C   OUTPUT ARGUMENTS:
+C     IO           INTEGER OUTPUT NUMBER OF LONGITUDE POINTS
+C     JO           INTEGER OUTPUT NUMBER OF LATITUDE POINTS
+C     KO           INTEGER OUTPUT NUMBER OF PRESSURE LEVELS
+C                  (UNKNOWN DECIMAL SCALINGS WILL NOT BE SET)
+C
+C ATTRIBUTES:
+C   LANGUAGE: CRAY FORTRAN
+C
+C$$$
+C - - - - - - - - - - - - - - - - - - - - - - - - - - - - - - - - - - -
+C  DEFAULT HORIZONTAL DIMENSION
+      IF(IO.EQ.0.OR.JO.EQ.0) THEN
+        IF(JCAP.EQ.62) THEN
+          IO=144
+          JO=73
+        ELSEIF(JCAP.EQ.126) THEN
+          IO=360
+          JO=181
+        ELSE
+          IO=360
+          JO=181
+        ENDIF
+      ENDIF
+C - - - - - - - - - - - - - - - - - - - - - - - - - - - - - - - - - - -
+C  DEFAULT VERTICAL DIMENSION
+      IF(KO.EQ.0) THEN
+        IF(LEVS.EQ.18) THEN
+          KO=13
+        ELSEIF(LEVS.EQ.28) THEN
+          KO=16
+        ELSE
+          KO=16
+        ENDIF
+      ENDIF
+C - - - - - - - - - - - - - - - - - - - - - - - - - - - - - - - - - - -
+      RETURN
+      END
+C-----------------------------------------------------------------------
+CFPP$ NOCONCUR R
+CFPP$ EXPAND(FPKAP)
+      SUBROUTINE POTMP(IM,IX,KM,SL,PS,T,TH)
+C$$$  SUBPROGRAM DOCUMENTATION BLOCK
+C
+C SUBPROGRAM:    POTMP       CALCULATE POTENTIAL TEMPERATURE
+C   PRGMMR: IREDELL          ORG: W/NMC23    DATE: 93-12-23
+C
+C ABSTRACT: CALCULATES POTENTIAL TEMPERATURE AS A FUNCTION
+C   OF PRESSURE AND TEMPERATURE.
+C
+C PROGRAM HISTORY LOG:
+C   93-12-23  IREDELL
+C
+C USAGE:    CALL POTMP(IM,IX,KM,SL,PS,T,TH)
+C
+C   INPUT ARGUMENT LIST:
+C     IM       - INTEGER NUMBER OF POINTS
+C     IX       - INTEGER FIRST DIMENSION OF UPPER AIR DATA
+C     KM       - INTEGER NUMBER OF LEVELS
+C     SL       - REAL (KM) SIGMA VALUES
+C     PS       - REAL (IM) SURFACE PRESSURE IN KPA
+C     T        - REAL (IX,KM) TEMPERATURE IN K
+C
+C   OUTPUT ARGUMENT LIST:
+C     TH       - REAL (IX,KM) POTENTIAL TEMPERATURE IN PERCENT
+C
+C ATTRIBUTES:
+C   LANGUAGE: CRAY FORTRAN
+C
+C$$$
+      DIMENSION SL(KM),PS(IM),T(IX,KM),TH(IX,KM)
+      DIMENSION SLK(KM),PSK(IM)
+      PARAMETER(RD= 2.8705E+2 ,CP= 1.0046E+3 )
+C - - - - - - - - - - - - - - - - - - - - - - - - - - - - - - - - - - -
+	write(*,*) 'potmp im,ix,km=',im,ix,km
+      DO i=1,KM
+	 slk(i) = sl(i)**(rd/cp)
+      ENDDO
+      DO I=1,IM
+        PSK(I)=FPKAP(PS(I))
+      ENDDO
+      DO K=1,KM
+        DO I=1,IM
+          TH(I,K)=T(I,K)/(SLK(K)*PSK(I))
+        ENDDO
+      ENDDO
+C - - - - - - - - - - - - - - - - - - - - - - - - - - - - - - - - - - -
+      RETURN
+      END
+C-----------------------------------------------------------------------
+CFPP$ NOCONCUR R
+      SUBROUTINE OMEGA(IM,IX,KM,SI,SL,
+     &                 PS,PSX,PSY,D,U,V,O)
+C$$$  SUBPROGRAM DOCUMENTATION BLOCK
+C
+C SUBPROGRAM:    OMEGA       CALCULATE PRESSURE VERTICAL VELOCITY
+C   PRGMMR: IREDELL          ORG: W/NMC23    DATE: 92-10-31
+C
+C ABSTRACT: CALCULATES PRESSURE VERTICAL VELOCITY OMEGA AS A FUNCTION
+C   OF SURFACE PRESSURE, SURFACE PRESSURE GRADIENTS, AND DIVERGENCE
+C   AND WIND COMPONENTS ON THE SIGMA SURFACES.  THE FORMULA FOR OMEGA
+C   IS DERIVED FROM THE CONTINUITY EQUATION
+C     O=(SIG*V.GRAD(LNPS)-SUM((D+V.GRAD(LNPS))*DSIG))*PS*1.E3
+C   WHERE THE SUM IS TAKEN FROM THE TOP OF THE ATMOSPHERE.
+C
+C PROGRAM HISTORY LOG:
+C   92-10-31  IREDELL
+C
+C USAGE:    CALL OMEGA(IM,IX,KM,SI,SL,
+C    &                 PS,PSX,PSY,D,U,V,O)
+C
+C   INPUT ARGUMENT LIST:
+C     IM       - INTEGER NUMBER OF POINTS
+C     IX       - INTEGER FIRST DIMENSION OF UPPER AIR DATA
+C     KM       - INTEGER NUMBER OF LEVELS
+C     SI       - REAL (KM+1) SIGMA INTERFACE VALUES
+C     SL       - REAL (KM) SIGMA VALUES
+C     PS       - REAL (IM) SURFACE PRESSURE IN KPA
+C     PSX      - REAL (IM) ZONAL GRADIENT OF LOG PRESSURE IN 1/M
+C     PSY      - REAL (IM) MERID GRADIENT OF LOG PRESSURE IN 1/M
+C     D        - REAL (IX,KM) DIVERGENCE IN 1/S
+C     U        - REAL (IX,KM) ZONAL WIND IN M/S
+C     V        - REAL (IX,KM) MERID WIND IN M/S
+C
+C   OUTPUT ARGUMENT LIST:
+C     O        - REAL (IX,KM) PRESSURE VERTICAL VELOCITY IN PA/S
+C
+C ATTRIBUTES:
+C   LANGUAGE: CRAY FORTRAN
+C
+C$$$
+      DIMENSION SI(KM+1),SL(KM)
+      DIMENSION PS(IM),PSX(IM),PSY(IM)
+      DIMENSION D(IX,KM),U(IX,KM),V(IX,KM),O(IX,KM)
+      DIMENSION SUM(IM)
+C - - - - - - - - - - - - - - - - - - - - - - - - - - - - - - - - - - -
+      DO I=1,IM
+        SUM(I)=0.
+      ENDDO
+      DO K=KM,1,-1
+        DO I=1,IM
+          VGRADP=U(I,K)*PSX(I)+V(I,K)*PSY(I)
+          GRADPV=VGRADP+D(I,K)
+          SUM(I)=SUM(I)+GRADPV*(SL(K)-SI(K+1))
+          O(I,K)=(VGRADP*SL(K)-SUM(I))*PS(I)*1.E3
+          SUM(I)=SUM(I)+GRADPV*(SI(K)-SL(K))
+        ENDDO
+      ENDDO
+C - - - - - - - - - - - - - - - - - - - - - - - - - - - - - - - - - - -
+      RETURN
+      END
+C-----------------------------------------------------------------------
+CFPP$ NOCONCUR R
+CFPP$ EXPAND(FPVS)
+      SUBROUTINE GETRH(IM,IX,KM,SL,PS,Q,T,R)
+C$$$  SUBPROGRAM DOCUMENTATION BLOCK
+C
+C SUBPROGRAM:    GETRH       CALCULATE RELATIVE HUMIDITY
+C   PRGMMR: IREDELL          ORG: W/NMC23    DATE: 92-10-31
+C
+C ABSTRACT: CALCULATES RELATIVE HUMIDITY AS A FUNCTION OF PRESSURE,
+C   SPECIFIC HUMIDITY AND TEMPERATURE.  SATURATION SPECIFIC HUMIDITY
+C   IS CALCULATED FROM SATURATION VAPOR PRESSURE WHICH IS RETURNED
+C   FROM A LOOKUP TABLE ROUTINE FPVS.
+C
+C PROGRAM HISTORY LOG:
+C   92-10-31  IREDELL
+C
+C USAGE:    CALL GETRH(IM,IX,KM,SL,PS,Q,T,R)
+C
+C   INPUT ARGUMENT LIST:
+C     IM       - INTEGER NUMBER OF POINTS
+C     IX       - INTEGER FIRST DIMENSION OF UPPER AIR DATA
+C     KM       - INTEGER NUMBER OF LEVELS
+C     SL       - REAL (KM) SIGMA VALUES
+C     PS       - REAL (IM) SURFACE PRESSURE IN KPA
+C     Q        - REAL (IX,KM) SPECIFIC HUMIDITY IN KG/KG
+C     T        - REAL (IX,KM) TEMPERATURE IN K
+C
+C   OUTPUT ARGUMENT LIST:
+C     R        - REAL (IX,KM) RELATIVE HUMIDITY IN PERCENT
+C
+C SUBPROGRAMS CALLED:
+C   (FPVS)   - FUNCTION TO COMPUTE SATURATION VAPOR PRESSURE
+C
+C ATTRIBUTES:
+C   LANGUAGE: CRAY FORTRAN
+C
+C$$$
+      DIMENSION SL(KM),PS(IM),Q(IX,KM),T(IX,KM),R(IX,KM)
+      PARAMETER(RD= 2.8705E+2 ,RV= 4.6150E+2 ,EPS=RD/RV,EPSM1=RD/RV-1.)
+C - - - - - - - - - - - - - - - - - - - - - - - - - - - - - - - - - - -
+      DO K=1,KM
+        DO I=1,IM
+          ES=FPVS(T(I,K))
+          QS=EPS*ES/(SL(K)*PS(I)+EPSM1*ES)
+          R(I,K)=MIN(MAX(Q(I,K)/QS*100.,0.),100.)
+        ENDDO
+      ENDDO
+C - - - - - - - - - - - - - - - - - - - - - - - - - - - - - - - - - - -
+      RETURN
+      END
+C-----------------------------------------------------------------------
+CFPP$ NOCONCUR R
+      SUBROUTINE BVFSQ(IM,IX,KM,SL,PS,T,F2)
+C$$$  SUBPROGRAM DOCUMENTATION BLOCK
+C
+C SUBPROGRAM:    BVFSQ       CALCULATE STATIC STABILITY
+C   PRGMMR: IREDELL          ORG: W/NMC23    DATE: 92-10-31
+C
+C ABSTRACT: CALCULATES STATIC STABILITY IN THE FORM OF
+C   THE BRUNT-VAISALA FREQUENCY SQUARED F2=G/T*(DT/DZ+G/CP)
+C   FROM SLICES OF TEMPERATURE AND PRESSURE.
+C   VERTICAL DIFFERENCING IS SECOND ORDER.
+C   F2 IS NOT ALLOWED BELOW 1.E-6.
+C
+C PROGRAM HISTORY LOG:
+C   93-12-21  IREDELL
+C   94-06-08  IREDELL    LIMIT LOWEST STABILITY
+C
+C USAGE:    CALL BVFSQ(IM,IX,KM,SL,PS,T,F2)
+C
+C   INPUT ARGUMENT LIST:
+C     IM       - INTEGER NUMBER OF POINTS
+C     IX       - INTEGER FIRST DIMENSION OF UPPER AIR DATA
+C     KM       - INTEGER NUMBER OF LEVELS
+C     SL       - REAL (KM) SIGMA VALUES
+C     PS       - REAL (IM) SURFACE PRESSURE IN KPA
+C     T        - REAL (IX,KM) TEMPERATURE IN K
+C
+C   OUTPUT ARGUMENT LIST:
+C     F2       - REAL (IX,KM) BRUNT VAISALA FREQUENCY SQUARED IN 1/S**2
+C
+C ATTRIBUTES:
+C   LANGUAGE: CRAY FORTRAN
+C
+C$$$
+      REAL SL(KM),PS(IM),T(IX,KM),F2(IX,KM)
+      PARAMETER(G= 9.8000E+0 ,CP= 1.0046E+3 ,RD= 2.8705E+2 )
+      PARAMETER(F2MIN=1.E-6)
+      REAL DASL(KM-1),BASL(KM,-1:1)
+C - - - - - - - - - - - - - - - - - - - - - - - - - - - - - - - - - - -
+      DO K=1,KM-1
+        DASL(K)=LOG(SL(K)/SL(K+1))
+      ENDDO
+      BASL(1,-1)=0.
+      BASL(1,0)=1./DASL(1)
+      BASL(1,1)=-1./DASL(1)
+      BASL(KM,-1)=1./DASL(KM-1)
+      BASL(KM,0)=-1./DASL(KM-1)
+      BASL(KM,1)=0.
+      DO K=2,KM-1
+        BASL(K,-1)=DASL(K)/((DASL(K-1)+DASL(K))*DASL(K-1))
+        BASL(K,0)=(DASL(K-1)-DASL(K))/(DASL(K-1)*DASL(K))
+        BASL(K,1)=-DASL(K-1)/((DASL(K-1)+DASL(K))*DASL(K))
+      ENDDO
+      K=1
+      DO I=1,IM
+        DTDASL=BASL(K,0)*T(I,K)+BASL(K,1)*T(I,K+1)
+        F2(I,K)=G/T(I,K)*(G/CP-G/RD/T(I,K)*DTDASL)
+        F2(I,K)=MAX(F2(I,K),F2MIN)
+      ENDDO
+      K=KM
+      DO I=1,IM
+        DTDASL=BASL(K,-1)*T(I,K-1)+BASL(K,0)*T(I,K)
+        F2(I,K)=G/T(I,K)*(G/CP-G/RD/T(I,K)*DTDASL)
+        F2(I,K)=MAX(F2(I,K),F2MIN)
+      ENDDO
+      DO K=2,KM-1
+        DO I=1,IM
+          DTDASL=BASL(K,-1)*T(I,K-1)+BASL(K,0)*T(I,K)+BASL(K,1)*T(I,K+1)
+          F2(I,K)=G/T(I,K)*(G/CP-G/RD/T(I,K)*DTDASL)
+          F2(I,K)=MAX(F2(I,K),F2MIN)
+        ENDDO
+      ENDDO
+C - - - - - - - - - - - - - - - - - - - - - - - - - - - - - - - - - - -
+      RETURN
+      END
+C-----------------------------------------------------------------------
+CFPP$ NOCONCUR R
+      SUBROUTINE HYDRO(IM,IX,KM,SI,SL,ZS,T,Q,Z,ZI)
+C$$$  SUBPROGRAM DOCUMENTATION BLOCK
+C
+C SUBPROGRAM:    HYDRO       CALCULATE GEOPOTENTIAL HEIGHTS
+C   PRGMMR: IREDELL          ORG: W/NMC23    DATE: 92-10-31
+C
+C ABSTRACT: CALCULATES GEOPOTENTIAL HEIGHTS ON BOTH THE SIGMA INTERFACES
+C   AND THE SIGMA FULL LEVELS AS A FUNCTION OF OROGRAPHY, TEMPERATURE
+C   AND MOISTURE.  VIRTUAL TEMPERATURE IS CALCULATED FROM TEMPERATURE
+C   AND MOISTURE AND THE HYDROSTATIC EQUATION IS INTEGRATED
+C     DZ=RD/G*TV*DLNP
+C
+C PROGRAM HISTORY LOG:
+C   92-10-31  IREDELL
+C
+C USAGE:    CALL HYDRO(IM,IX,KM,SI,SL,ZS,T,Q,Z,ZI)
+C
+C   INPUT ARGUMENT LIST:
+C     IM       - INTEGER NUMBER OF POINTS
+C     IX       - INTEGER FIRST DIMENSION OF UPPER AIR DATA
+C     KM       - INTEGER NUMBER OF LEVELS
+C     SI       - REAL (KM+1) SIGMA INTERFACE VALUES
+C     SL       - REAL (KM) SIGMA VALUES
+C     ZS       - REAL (IM) OROGRAPHY IS M
+C     T        - REAL (IX,KM) TEMPERATURE IN K
+C     Q        - REAL (IX,KM) SPECIFIC HUMIDITY IN KG/KG
+C
+C   OUTPUT ARGUMENT LIST:
+C     Z        - REAL (IX,KM) HEIGHTS ON THE FULL LEVELS IN M
+C     ZI       - REAL (IX,KM) HEIGHTS ON THE INTERFACES IN M
+C
+C ATTRIBUTES:
+C   LANGUAGE: CRAY FORTRAN
+C
+C$$$
+      DIMENSION SI(KM+1),SL(KM),ZS(IM),T(IX,KM),Q(IX,KM)
+      DIMENSION Z(IX,KM),ZI(IX,KM)
+      PARAMETER(G= 9.8000E+0 ,RD= 2.8705E+2 ,RV= 4.6150E+2 )
+      PARAMETER(ROG=RD/G,FVIRT=RV/RD-1.)
+C - - - - - - - - - - - - - - - - - - - - - - - - - - - - - - - - - - -
+      DO I=1,IM
+        ZI(I,1)=ZS(I)
+      ENDDO
+C - - - - - - - - - - - - - - - - - - - - - - - - - - - - - - - - - - -
+      DO K=1,KM-1
+        CA=ROG*LOG(SI(K)/SL(K))
+        CB=ROG*LOG(SL(K)/SI(K+1))
+        DO I=1,IM
+          TV=T(I,K)*(1.+FVIRT*Q(I,K))
+          Z(I,K)=ZI(I,K)+CA*TV
+          ZI(I,K+1)=Z(I,K)+CB*TV
+        ENDDO
+      ENDDO
+C - - - - - - - - - - - - - - - - - - - - - - - - - - - - - - - - - - -
+      CA=ROG*LOG(SI(KM)/SL(KM))
+      DO I=1,IM
+        TV=T(I,KM)*(1.+FVIRT*Q(I,KM))
+        Z(I,KM)=ZI(I,KM)+CA*TV
+      ENDDO
+C - - - - - - - - - - - - - - - - - - - - - - - - - - - - - - - - - - -
+      RETURN
+      END
+C-----------------------------------------------------------------------
+CFPP$ NOCONCUR R
+      SUBROUTINE SIG2I(IM,IX,KM,SL,PS,TS,US,VS,OS,RHS,SSS,ZS,
+     &                 KO,THO,TI,UI,VI,OI,RHI,SSI,ZI,IBM,LBM)
+C$$$  SUBPROGRAM DOCUMENTATION BLOCK
+C
+C  SUBPROGRAM:    SIG2I       SIGMA TO ISENTROPIC INTERPOLATION
+C   PRGMMR: IREDELL          ORG: W/NMC23    DATE: 92-10-31
+C
+C ABSTRACT: INTERPOLATES TEMPERATURE, WINDS, HEIGHT, HUMIDITY AND STATIC
+C   STABILITY FROM THE SIGMA COORDINATE SYSTEM TO ISENTROPIC SURFACES.
+C   ASSUMES THAT THE FIELDS VARY LINEARLY IN THE VERTICAL
+C   WITH THE LOG OF POTENTIAL TEMPERATURE.  BELOW GROUND AND ABOVE TOP,
+C   REASONABLE VALUES ARE COMPUTED BUT BITMAP IS SET FALSE.
+C
+C PROGRAM HISTORY LOG:
+C   93-12-22  IREDELL
+C
+C USAGE:    CALL SIG2I(IM,IX,KM,SL,
+C    &                 PS,TS,US,VS,OS,RHS,SSS,ZS,
+C    &                 KO,THO,TI,UI,VI,OI,RHI,SSI,ZI,IBM,LBM)
+C
+C   INPUT ARGUMENT LIST:
+C     IM       - INTEGER NUMBER OF POINTS
+C     IX       - INTEGER FIRST DIMENSION OF UPPER AIR DATA
+C     KM       - INTEGER NUMBER OF SIGMA LEVELS
+C     SL       - REAL (KM) SIGMA VALUES
+C     PS       - REAL (IM) SURFACE PRESSURE IN KPA
+C     TS       - REAL (IX,KM) TEMPERATURE IN K
+C     US       - REAL (IX,KM) ZONAL WIND IN M/S
+C     VS       - REAL (IX,KM) MERID WIND IN M/S
+C     OS       - REAL (IX,KM) VERTICAL VELOCITY IN PA/S
+C     RHS      - REAL (IX,KM) RELATIVE HUMIDITY IN PERCENT
+C     SSS      - REAL (IX,KM) STATIC STABILITY IN 1/S**2
+C     ZS       - REAL (IX,KM) HEIGHTS IN M
+C     KO       - INTEGER NUMBER OF ISENTROPIC LEVELS
+C     THO      - REAL (KO) POTENTIAL TEMPERATURE IN K
+C
+C   OUTPUT ARGUMENT LIST:
+C     TI       - REAL (IX,KO) TEMPERATURE IN K
+C     UI       - REAL (IX,KO) ZONAL WIND IN M/S
+C     VI       - REAL (IX,KO) MERID WIND IN M/S
+C     OI       - REAL (IX,KO) VERTICAL VELOCITY IN PA/S
+C     RHI      - REAL (IX,KO) RELATIVE HUMIDITY IN PERCENT
+C     SSI      - REAL (IX,KO) STATIC STABILITY IN 1/S**2
+C     ZI       - REAL (IX,KO) HEIGHTS IN M
+C     IBM      - INTEGER (KO) BITMAP FLAG
+C                (0 FOR NO BITMAP, 1 FOR BITMAP)
+C     LBM      - LOGICAL (IX,KO) BITMAP
+C
+C SUBPROGRAMS CALLED:
+C   ISRCHFGT - FIND FIRST VALUE IN AN ARRAY GREATER THAN TARGET VALUE
+C
+C ATTRIBUTES:
+C   LANGUAGE: CRAY FORTRAN
+C
+C$$$
+      REAL SL(KM),PS(IM)
+      REAL TS(IX,KM),US(IX,KM),VS(IX,KM),OS(IX,KM)
+      REAL RHS(IX,KM),SSS(IX,KM),ZS(IX,KM)
+      REAL THO(KO)
+      REAL TI(IX,KO),UI(IX,KO),VI(IX,KO),OI(IX,KO)
+      REAL RHI(IX,KO),SSI(IX,KO),ZI(IX,KO)
+      INTEGER IBM(KO)
+      LOGICAL LBM(IX,KO)
+      REAL S(IX,KO)
+      REAL ASL(KM),ATHO(KO),ATH(IM,KM)
+      PARAMETER(G= 9.8000E+0 ,CP= 1.0046E+3 )
+      PARAMETER(RD= 2.8705E+2 )
+      PARAMETER(P0=1000.E-1,ROCP=RD/CP,ROG=RD/G)
+C - - - - - - - - - - - - - - - - - - - - - - - - - - - - - - - - - - -
+C  COMPUTE LOGS FOR INTERPOLATION
+      AP0=LOG(P0)
+c     ASL=LOG(SL)
+	do i = 1, km
+	    asl(i) = log(sl(i))
+	enddo
+c     ATHO=LOG(THO)
+	do i = 1, ko
+	    atho(i) = log(tho(i))
+	enddo
+      DO K=1,KM
+c       ATH(1:IM,K)=LOG(TS(1:IM,K))+ROCP*(AP0-LOG(PS(1:IM))-ASL(K))
+	do i = 1, im
+           ATH(i,K)=LOG(TS(i,K))+ROCP*(AP0-LOG(PS(i))-ASL(K))
+	enddo
+      ENDDO
+C - - - - - - - - - - - - - - - - - - - - - - - - - - - - - - - - - - -
+C  DETERMINE SIGMA LAYERS BRACKETING ISENTROPIC LAYER
+C  AND INTERPOLATE TO OBTAIN REAL SIGMA LAYER NUMBER
+      DO I=1,IM
+        KD=0
+        DO K=1,KO
+          IF(KD.LT.KM) KD=KD+ISRCHFGT(KM-KD,ATH(I,KD+1),IM,ATHO(K))-1
+          IF(KD.EQ.0) THEN
+            S(I,K)=1
+          ELSEIF(KD.EQ.KM) THEN
+            S(I,K)=KM
+          ELSE
+            S(I,K)=KD+(ATHO(K)-ATH(I,KD))/(ATH(I,KD+1)-ATH(I,KD))
+          ENDIF
+        ENDDO
+      ENDDO
+C - - - - - - - - - - - - - - - - - - - - - - - - - - - - - - - - - - -
+C  INTERPOLATE SIGMA TO ISENTROPIC
+      DO K=1,KO
+        IBM(K)=0
+        DO I=1,IM
+          IF(S(I,K).LE.1.OR.S(I,K).GE.KM) THEN
+C  OUTSIDE SIGMA STRUCTURE, KEEP FIELDS CONSTANT BUT EXTRAPOLATE HEIGHT
+            KS=NINT(S(I,K))
+            TI(I,K)=TS(I,KS)
+            UI(I,K)=US(I,KS)
+            VI(I,K)=VS(I,KS)
+            OI(I,K)=OS(I,KS)
+            RHI(I,K)=RHS(I,KS)
+            SSI(I,K)=SSS(I,KS)
+            ZI(I,K)=ZS(I,KS)+G*(ATHO(K)-ATH(I,KS))/SSS(I,KS)
+            IBM(K)=1
+            LBM(I,K)=.FALSE.
+          ELSE
+C  WITHIN SIGMA STRUCTURE, INTERPOLATE FIELDS LINEARLY IN LOG THETA
+C  BETWEEN BRACKETING FULL SIGMA LAYERS
+            KD=MAX(INT(S(I,K)),1)
+            KU=KD+1
+            WU=S(I,K)-KD
+            WD=1.-WU
+            TI(I,K)=WU*TS(I,KU)+WD*TS(I,KD)
+            UI(I,K)=WU*US(I,KU)+WD*US(I,KD)
+            VI(I,K)=WU*VS(I,KU)+WD*VS(I,KD)
+            OI(I,K)=WU*OS(I,KU)+WD*OS(I,KD)
+            RHI(I,K)=WU*RHS(I,KU)+WD*RHS(I,KD)
+            SSI(I,K)=WU*SSS(I,KU)+WD*SSS(I,KD)
+            ZI(I,K)=WU*ZS(I,KU)+WD*ZS(I,KD)
+            LBM(I,K)=.TRUE.
+          ENDIF
+        ENDDO
+      ENDDO
+C - - - - - - - - - - - - - - - - - - - - - - - - - - - - - - - - - - -
+      RETURN
+      END
+C-----------------------------------------------------------------------
+CFPP$ NOCONCUR R
+      SUBROUTINE MONTP(IM,IX,KM,T,Z,PMONT)
+C$$$  SUBPROGRAM DOCUMENTATION BLOCK
+C
+C SUBPROGRAM:    MONTP       CALCULATE MONTGOMERY POTENTIAL
+C   PRGMMR: IREDELL          ORG: W/NMC23    DATE: 92-10-31
+C
+C ABSTRACT: CALCULATES MONTGOMERY POTENTIAL CP T + G Z.
+C
+C PROGRAM HISTORY LOG:
+C   93-12-21  IREDELL
+C
+C USAGE:    CALL MONTP(IM,IX,KM,T,Z,PMONT)
+C
+C   INPUT ARGUMENT LIST:
+C     IM       - INTEGER NUMBER OF POINTS
+C     IX       - INTEGER FIRST DIMENSION OF UPPER AIR DATA
+C     KM       - INTEGER NUMBER OF LEVELS
+C     T        - REAL (IX,KM) TEMPERATURE IN K
+C     Z        - REAL (IX,KM) HEIGHT IN K
+C
+C   OUTPUT ARGUMENT LIST:
+C     PMONT     - REAL (IX,KM) MONTGOMERY POTENTIAL IN M**2/S**2
+C
+C ATTRIBUTES:
+C   LANGUAGE: CRAY FORTRAN
+C
+C$$$
+      REAL T(IX,KM),Z(IX,KM),PMONT(IX,KM)
+      PARAMETER(G= 9.8000E+0 ,CP= 1.0046E+3 )
+C - - - - - - - - - - - - - - - - - - - - - - - - - - - - - - - - - - -
+      DO K=1,KM
+        DO I=1,IM
+          PMONT(I,K)=CP*T(I,K)+G*Z(I,K)
+        ENDDO
+      ENDDO
+C - - - - - - - - - - - - - - - - - - - - - - - - - - - - - - - - - - -
+      RETURN
+      END
+C-----------------------------------------------------------------------
+      SUBROUTINE LLIPV(IM2,JM2,KM,M,CLAT,SLAT,WLAT,TRIG,IFAX,
+     &                 TH,U,V,T,PM,SS,PV)
+C$$$  SUBPROGRAM DOCUMENTATION BLOCK
+C
+C SUBPROGRAM: LLIPV          COMPUTES POTENTIAL VORTICITY
+C   PRGMMR: IREDELL          ORG: W/NMC23     DATE: 94-04-01
+C
+C ABSTRACT: COMPUTES ISENTROPIC POTENTIAL VORTICITY SPECTRALLY
+C   FROM ISENTROPIC WINDS, TEMPERATURE, MONTGOMERY POTENTIAL
+C   AND STATIC STABILITY (BRUNT-VAISALA FREQUENCY SQUARED).
+C   THE POTENTIAL VORTICITY IS DEFINED AS
+C
+C     PI = (ZETA + 2*OMEGA*(SINLAT-DZDY*COSLAT))*SS/(G*RHO)
+C
+C   WHERE ZETA IS ISENTROPIC VORTICITY, OMEGA IS PLANETARY VORTICITY,
+C   DZDY IS THE MERIDIONAL GRADIENT OF HEIGHT ON AN ISENTROPIC SURFACE,
+C   SS IS THE STATIC STABILITY DEFINED AS G*D(LOG(THETA))/DZ AND
+C   RHO IS THE DENSITY.
+C   ALL FIELDS ARE ON AN ISENTROPIC GLOBAL LATLON GRID INCLUDING POLES
+C   WITH NORTHERN AND SOUTHERN HEMISPHERES PAIRED.
+C
+C PROGRAM HISTORY LOG:
+C   94-04-01  IREDELL
+C
+C USAGE:    CALL LLIPV(IM2,JM2,KM,M,CLAT,SLAT,WLAT,TRIG,IFAX,
+C    &                 TH,U,V,T,PM,SS,PV)
+C   INPUT ARGUMENTS:
+C     IM2          INTEGER TWICE THE NUMBER OF LONGITUDE POINTS
+C     JM2          INTEGER HALF THE NUMBER OF LATITUDE POINTS
+C     KM           INTEGER NUMBER OF LEVELS
+C     M            INTEGER SPECTRAL TRUNCATION (JM2-1 RECOMMENDED)
+C     CLAT         REAL (JM2) COSINES OF LATITUDE
+C     SLAT         REAL (JM2) POSITIVE SINES OF LATITUDE
+C     WLAT         REAL (JM2) GAUSSIAN WEIGHTS
+C     TRIG         REAL (IM2) TRIGONOMETRIC QUANTITIES FOR THE FFT
+C     IFAX         INTEGER (20) FACTORS FOR THE FFT
+C     TH           REAL (KM) POTENTIAL TEMPERATURE IN K
+C     U            REAL (IM2,JM2,KM) ZONAL COMPONENT IN M/S
+C     V            REAL (IM2,JM2,KM) MERIDIONAL COMPONENT IN M/S
+C     T            REAL (IM2,JM2,KM) TEMPERATURE IN K
+C     PM           REAL (IM2,JM2,KM) MONTGOMERY POTENTIAL IN M**2/S**2
+C     SS           REAL (IM2,JM2,KM) STATIC STABILITY IN 1/S**2
+C   OUTPUT ARGUMENTS:
+C     PV           REAL (IM2,JM2,KM) POTENTIAL VORTICITY IN 1/S/M
+C
+C SUBPROGRAMS CALLED:
+C   GSPC         COMPUTE SPECTRAL CONSTANTS
+C   RFFTMLT      COMPUTE FFT
+C   FCOMB        COMPUTE EVEN AND ODD COMPONENTS
+C   PLEG         COMPUTE LEGENDRE FUNCTIONS
+C   PANALY       COMPUTE SPECTRAL FROM FOURIER
+C   UV2DZ        COMPUTE DIVERGENCE AND VORTICITY IN SPECTRAL SPACE
+C   GRADQ        COMPUTE GRADIENT IN SPECTRAL SPACE
+C   PSYNTH       COMPUTE FOURIER FROM SPECTRAL
+C   PLEGP        COMPUTE ASSOCIATED LEGENDRE POLYNOMIALS
+C   PSYNTHP      SYNTHESIZE FOURIER FROM SPECTRAL COEFFICIENTS
+C
+C ATTRIBUTES:
+C   LANGUAGE: CRAY FORTRAN
+C
+C$$$
+      REAL SLAT(JM2),CLAT(JM2),WLAT(JM2)
+      REAL TRIG(IM2)
+      INTEGER IFAX(20)
+      REAL TH(KM)
+      REAL U(IM2,JM2,KM),V(IM2,JM2,KM),T(IM2,JM2,KM)
+      REAL PM(IM2,JM2,KM),SS(IM2,JM2,KM),PV(IM2,JM2,KM)
+      REAL EPS((M+1)*(M+2)/2),EPSTOP(M+1)
+      REAL ENN1((M+1)*(M+2)/2),ELONN1((M+1)*(M+2)/2)
+      REAL EON((M+1)*(M+2)/2),EONTOP(M+1)
+      REAL WFFT(IM2,2*3*KM)
+      REAL PLN((M+1)*(M+2)/2),PLNTOP(M+1)
+      REAL F1(IM2/2+3,2,3*KM)
+      REAL S1((M+1)*(M+2),3*KM),S1TOP(2*(M+1),3*KM)
+      REAL S2((M+1)*(M+2),2*KM),S2TOP(2*(M+1),2*KM)
+      REAL SD((M+1)*(M+2))
+      INTEGER MPF(KM)
+      PARAMETER(CP= 1.0046E+3 ,G= 9.8000E+0 )
+      PARAMETER(RD= 2.8705E+2 ,OMEGA= 7.2921E-5 )
+      PARAMETER(P0=1000.E2)
+      PARAMETER(ROG=RD/G,CPOR=CP/RD)
+C - - - - - - - - - - - - - - - - - - - - - - - - - - - - - - - - - - -
+C  SET TRANSFORM CONSTANTS
+      IM=IM2/2
+      IX=IM+3
+c     MPF=0
+	call ifill(mpf,km,0)
+      NC=(M+1)*(M+2)
+      NCTOP=2*(M+1)
+      CALL GSPC(M,EPS,EPSTOP,ENN1,ELONN1,EON,EONTOP)
+C - - - - - - - - - - - - - - - - - - - - - - - - - - - - - - - - - - -
+C  TRANSFORM WINDS AND HEIGHT TO SPECTRAL SPACE
+      DO K=1,KM
+        DO I=1,NC
+          S1(I,K)=0.
+          S1(I,K+KM)=0.
+          S1(I,K+2*KM)=0.
+        ENDDO
+        DO I=1,NCTOP
+          S1TOP(I,K)=0.
+          S1TOP(I,K+KM)=0.
+          S1TOP(I,K+2*KM)=0.
+          S2TOP(I,K)=0.
+        ENDDO
+      ENDDO
+      DO J=2,JM2
+        DO K=1,KM
+          DO I=1,IM
+            F1(I,1,K)=U(I,J,K)/CLAT(J)
+            F1(I,2,K)=U(I+IM,J,K)/CLAT(J)
+            F1(I,1,K+KM)=V(I,J,K)/CLAT(J)
+            F1(I,2,K+KM)=V(I+IM,J,K)/CLAT(J)
+            F1(I,1,K+2*KM)=(PM(I,J,K)-CP*T(I,J,K))/G
+            F1(I,2,K+2*KM)=(PM(I+IM,J,K)-CP*T(I+IM,J,K))/G
+          ENDDO
+        ENDDO
+        CALL RFFTMLT(F1,WFFT,TRIG,IFAX,1,IX,IM,2*3*KM,-1)
+        CALL FCOMB(M,IX,3*KM,F1)
+        CALL PLEG(M,SLAT(J),CLAT(J),EPS,EPSTOP,PLN,PLNTOP)
+        WA=WLAT(J)
+        DO L=0,M
+          CALL PANALY(M,IX,NC,NCTOP,L,3*KM,WA,PLN,PLNTOP,F1,S1,S1TOP)
+        ENDDO
+      ENDDO
+C - - - - - - - - - - - - - - - - - - - - - - - - - - - - - - - - - - -
+C  SPECTRALLY COMPUTE VORTICITY AND GRADIENT
+      DO K=1,KM
+        CALL UV2DZ(M,ENN1,ELONN1,EON,EONTOP,
+     &             S1(1,K),S1(1,K+KM),S1TOP(1,K),S1TOP(1,K+KM),
+     &             SD,S2(1,K))
+        CALL GRADQ(M,ENN1,ELONN1,EON,EONTOP,S1(1,K+2*KM),
+     &             SD,S2(1,K+KM),S2TOP(1,K+KM))
+      ENDDO
+C - - - - - - - - - - - - - - - - - - - - - - - - - - - - - - - - - - -
+C  TRANSFORM COMPONENTS TO GRID
+      DO J=1,JM2
+        IF(CLAT(J).EQ.0.) THEN
+          CALL PLEGP(M,EPS,EPSTOP,PLN,PLNTOP)
+          CALL PSYNTHP(M,IX,NC,NCTOP,KM,PLN,PLNTOP,MPF,S2,S2TOP,F1)
+          DO K=1,KM
+            AV1=F1(1,1,K)+2*OMEGA
+            RG1=ROG*T(1,J,K)*(TH(K)/T(1,J,K))**CPOR/P0
+            PV1=AV1*RG1*SS(1,J,K)
+            AV2=F1(1,2,K)-2*OMEGA
+            RG2=ROG*T(1+IM,J,K)*(TH(K)/T(1+IM,J,K))**CPOR/P0
+            PV2=AV2*RG2*SS(1+IM,J,K)
+            DO I=1,IM
+              PV(I,J,K)=PV1
+              PV(I+IM,J,K)=PV2
+            ENDDO
+          ENDDO
+        ELSE
+          CALL PLEG(M,SLAT(J),CLAT(J),EPS,EPSTOP,PLN,PLNTOP)
+          CALL PSYNTH(M,IX,NC,NCTOP,2*KM,PLN,PLNTOP,S2,S2TOP,F1)
+          CALL RFFTMLT(F1,WFFT,TRIG,IFAX,1,IX,IM,2*2*KM,1)
+          DO K=1,KM
+            DO I=1,IM
+              AV1=F1(I,1,K)+2*OMEGA*(SLAT(J)-F1(I,1,K+KM))
+              RG1=ROG*T(I,J,K)*(TH(K)/T(I,J,K))**CPOR/P0
+              PV(I,J,K)=AV1*RG1*SS(I,J,K)
+              AV2=F1(I,2,K)+2*OMEGA*(-SLAT(J)-F1(I,2,K+KM))
+              RG2=ROG*T(I+IM,J,K)*(TH(K)/T(I+IM,J,K))**CPOR/P0
+              PV(I+IM,J,K)=AV2*RG2*SS(I+IM,J,K)
+            ENDDO
+          ENDDO
+        ENDIF
+      ENDDO
+C - - - - - - - - - - - - - - - - - - - - - - - - - - - - - - - - - - -
+      RETURN
+      END
+C-----------------------------------------------------------------------
+CFPP$ NOCONCUR R
+      SUBROUTINE ROWSEP(IM,JM,A)
+C$$$  SUBPROGRAM DOCUMENTATION BLOCK
+C                .      .    .                                       .
+C SUBPROGRAM:    ROWSEP      SEPARATE NORTHERN AND SOUTHERN LATITUDES.
+C   PRGMMR: IREDELL          ORG: W/NMC23    DATE: 92-10-31
+C
+C ABSTRACT: SEPARATE NORTHERN AND SOUTHERN LATITUDES OF GRID.
+C   INLINE FUNCTION JLOC RETURNS INPUT LATITUDE GIVEN OUTPUT LATITUDE.
+C   LATITUDE ROWS ARE SWAPPED IN THE ARRAY UNTIL ALL ARE DONE.
+C
+C PROGRAM HISTORY LOG:
+C   88-04-12  JOSEPH SELA
+C   92-10-31  IREDELL
+C
+C USAGE:    CALL ROWSEP(IM,JM,A)
+C   INPUT ARGUMENT LIST:
+C     IM       - INTEGER NUMBER OF LONGITUDES IN GRID
+C     JM       - INTEGER NUMBER OF LATITUDES IN GRID
+C     A        - REAL (IM,JM) GRID DATA
+C                WITH PAIRED NORTHERN AND SOUTHERN LATITUDES.
+C                INPUT ARRAY IS OVERWRITTEN BY OUTPUT ARRAY.
+C
+C   OUTPUT ARGUMENT LIST:
+C     A        - REAL (IM,JM) GRID DATA
+C                WITH SEPARATED NORTHERN AND SOUTHERN LATITUDES.
+C
+C SUBPROGRAMS CALLED:
+C   ISRCHEQ  - FIND FIRST VALUE IN AN ARRAY EQUAL TO TARGET VALUE
+C
+C REMARKS:
+C   FORTRAN 77 EXTENSIONS ARE USED
+C   SUCH AS AUTOMATIC ARRAYS, ARRAY SECTIONS AND DOWHILE STATEMENTS
+C
+C ATTRIBUTES:
+C   LANGUAGE: CRAY FORTRAN
+C
+C$$$
+      DIMENSION A(IM,JM)
+      DIMENSION B(IM),JDONE(JM)
+      JLOC(JA)=MIN(2*JA-1,2*(JM+1-JA))
+C - - - - - - - - - - - - - - - - - - - - - - - - - - - - - - - - - - -
+c     JDONE=0
+	call ifill(jdone,jm,0)
+      JSAVE=1
+      DOWHILE(JSAVE.LE.JM)
+c       B(:)=A(:,JSAVE)
+	do i = 1, im
+	    b(i) = a(i,jsave)
+	enddo
+        JPUT=JSAVE
+        JGET=JLOC(JPUT)
+        DOWHILE(JGET.NE.JSAVE)
+c         A(:,JPUT)=A(:,JGET)
+	  do i = 1, im
+	     a(i,jput) = a(i,jget)
+	  enddo
+          JDONE(JPUT)=1
+          JPUT=JGET
+          JGET=JLOC(JPUT)
+        ENDDO
+c       A(:,JPUT)=B(:)
+	do i = 1, im
+	    a(i,jput) = b(i)
+	enddo
+        JDONE(JPUT)=1
+        JSAVE=JSAVE+ISRCHEQ(JM-JSAVE,JDONE(JSAVE+1),1,0)
+      ENDDO
+C - - - - - - - - - - - - - - - - - - - - - - - - - - - - - - - - - - -
+      RETURN
+      END
+C-----------------------------------------------------------------------
+CFPP$ NOCONCUR R
+      SUBROUTINE GRIBIT(F,LBM,IDRT,IM,JM,MXBIT,COLAT1,
+     &                  ILPDS,IPTV,ICEN,IGEN,IBMS,IPU,ITL,IL1,IL2,
+     &                  IYYYY,IMO,IDY,IHR,IFTU,IP1,IP2,ITR,
+     &                  INA,INM,ICEN2,IDS,
+     &                  XLAT1,XLON1,DELX,DELY,ORIENT,PROJ,
+     &                  GRIB,LGRIB,IERR)
+C$$$  SUBPROGRAM DOCUMENTATION BLOCK
+C
+C SUBPROGRAM:    GRIBIT      CREATE GRIB MESSAGE
+C   PRGMMR: IREDELL          ORG: W/NMC23    DATE: 92-10-31
+C
+C ABSTRACT: CREATE A GRIB MESSAGE FROM A FULL FIELD.
+C   AT PRESENT, ONLY GLOBAL LATLON GRIDS AND GAUSSIAN GRIDS
+C   AND REGIONAL POLAR PROJECTIONS ARE ALLOWED.
+C
+C PROGRAM HISTORY LOG:
+C   92-10-31  IREDELL
+C   94-05-04  JUANG (FOR GSM AND RSM USE)
+C
+C USAGE:    CALL GRIBIT(F,LBM,IDRT,IM,JM,MXBIT,COLAT1,
+C    &                  ILPDS,IPTV,ICEN,IGEN,IBMS,IPU,ITL,IL1,IL2,
+C    &                  IYR,IMO,IDY,IHR,IFTU,IP1,IP2,ITR,
+C    &                  INA,INM,ICEN2,IDS,
+C    &                  XLAT1,XLON1,DELX,DELY,ORIENT,PROJ,
+C    &                  GRIB,LGRIB,IERR)
+C   INPUT ARGUMENT LIST:
+C     F        - REAL (IM*JM) FIELD DATA TO PACK INTO GRIB MESSAGE
+C     LBM      - LOGICAL (IM*JM) BITMAP TO USE IF IBMS=1
+C     IDRT     - INTEGER DATA REPRESENTATION TYPE
+C                (0 FOR LATLON OR 4 FOR GAUSSIAN OR 5 FOR POLAR)
+C     IM       - INTEGER LONGITUDINAL DIMENSION
+C     JM       - INTEGER LATITUDINAL DIMENSION
+C     MXBIT    - INTEGER MAXIMUM NUMBER OF BITS TO USE (0 FOR NO LIMIT)
+C     COLAT1   - REAL FIRST COLATITUDE OF GRID IF IDRT=4 (RADIANS)
+C     ILPDS    - INTEGER LENGTH OF THE PDS (USUALLY 28)
+C     IPTV     - INTEGER PARAMETER TABLE VERSION (USUALLY 1)
+C     ICEN     - INTEGER FORECAST CENTER (USUALLY 7)
+C     IGEN     - INTEGER MODEL GENERATING CODE
+C     IBMS     - INTEGER BITMAP FLAG (0 FOR NO BITMAP)
+C     IPU      - INTEGER PARAMETER AND UNIT INDICATOR
+C     ITL      - INTEGER TYPE OF LEVEL INDICATOR
+C     IL1      - INTEGER FIRST LEVEL VALUE (0 FOR SINGLE LEVEL)
+C     IL2      - INTEGER SECOND LEVEL VALUE
+C     IYR      - INTEGER YEAR
+C     IMO      - INTEGER MONTH
+C     IDY      - INTEGER DAY
+C     IHR      - INTEGER HOUR
+C     IFTU     - INTEGER FORECAST TIME UNIT (1 FOR HOUR)
+C     IP1      - INTEGER FIRST TIME PERIOD
+C     IP2      - INTEGER SECOND TIME PERIOD (0 FOR SINGLE PERIOD)
+C     ITR      - INTEGER TIME RANGE INDICATOR (10 FOR SINGLE PERIOD)
+C     INA      - INTEGER NUMBER INCLUDED IN AVERAGE
+C     INM      - INTEGER NUMBER MISSING FROM AVERAGE
+C     ICEN2    - INTEGER FORECAST SUBCENTER (USUALLY 0 BUT 1 FOR REANAL)
+C     IDS      - INTEGER DECIMAL SCALING
+C     XLAT1    - REAL FIRST POINT OF REGIONAL LATITUDE (RADIANS)
+C     XLON1    - REAL FIRST POINT OF REGIONAL LONGITUDE (RADIANS)
+C     DELX     - REAL DX ON 60N FOR REGIONAL (M)
+C     DELY     - REAL DY ON 60N FOR REGIONAL (M)
+C     PROJ     - REAL POLAR PROJECTION FLAG 0 FOR NORTH 1 FOR SOUTH
+C     ORIENT   - REAL ORIENTATION OF REGIONAL DOMAIN
+C
+C   OUTPUT ARGUMENT LIST:
+C     GRIB     - CHARACTER (LGRIB) GRIB MESSAGE
+C     LGRIB    - INTEGER LENGTH OF GRIB MESSAGE
+C                (NO MORE THAN 100+ILPDS+IM*JM*(MXBIT+1)/8)
+C     IERR     - INTEGER ERROR CODE (0 FOR SUCCESS)
+C
+C SUBPROGRAMS CALLED:
+C   GTBITS     - COMPUTE NUMBER OF BITS AND ROUND DATA APPROPRIATELY
+C   W3FI72     - ENGRIB DATA INTO A GRIB1 MESSAGE
+C
+C ATTRIBUTES:
+C   LANGUAGE: CRAY FORTRAN
+C
+C$$$
+      REAL F(IM*JM)
+      LOGICAL LBM(IM*JM)
+      CHARACTER GRIB(*)
+      INTEGER IBM(IM*JM*IBMS+1-IBMS),IPDS(25),IGDS(18),IBDS(9)
+      REAL FR(IM*JM)
+      CHARACTER PDS(ILPDS)
+C - - - - - - - - - - - - - - - - - - - - - - - - - - - - - - - - - - -
+C  DETERMINE GRID PARAMETERS
+	  iyr=mod(iyyyy-1,100)+1
+	  icentury=(iyyyy-1)/100+1
+
+      PI=ACOS(-1.)
+      NF=IM*JM
+      IF(IDRT.EQ.0) THEN
+        IF(IM.EQ.144.AND.JM.EQ.73) THEN
+          IGRID=2
+        ELSEIF(IM.EQ.360.AND.JM.EQ.181) THEN
+          IGRID=3
+        ELSE
+          IGRID=255
+        ENDIF
+        IRESFL=128
+        ISCAN=0
+        LAT1=NINT(90.E3)
+        LON1=0
+        LATI=NINT(180.E3/(JM-1))
+        LONI=NINT(360.E3/IM)
+        IGDS09=-LAT1
+        IGDS10=-LONI
+        IGDS11=LATI
+        IGDS12=LONI
+      ELSEIF(IDRT.EQ.4) THEN
+        IGRID=255
+        IRESFL=128
+        ISCAN=0
+        LAT1=NINT(90.E3-180.E3/PI*COLAT1)
+        LON1=0
+        LATI=JM/2
+        LONI=NINT(360.E3/IM)
+        IGDS09=-LAT1
+        IGDS10=-LONI
+        IGDS11=LATI
+        IGDS12=LONI
+      ELSEIF(IDRT.EQ.5) THEN    ! POLAR PROJECTION
+        IGRID=255
+        IRESFL=0
+        ISCAN=2
+        LAT1=180.E3/PI*XLAT1
+        LON1=180.E3/PI*XLON1
+        IGDS09=ORIENT*1.E3
+        IGDS10=DELX
+        IGDS11=DELY
+        IGDS12=PROJ
+      ELSE
+        IERR=40
+        RETURN
+      ENDIF
+C - - - - - - - - - - - - - - - - - - - - - - - - - - - - - - - - - - -
+C  RESET TIME RANGE PARAMETER IN CASE OF OVERFLOW
+      IF(ITR.GE.2.AND.ITR.LE.5.AND.IP2.GE.256) THEN
+        JP1=IP2
+        JP2=0
+        JTR=10
+      ELSE
+        JP1=IP1
+        JP2=IP2
+        JTR=ITR
+      ENDIF
+C - - - - - - - - - - - - - - - - - - - - - - - - - - - - - - - - - - -
+C  FILL PDS PARAMETERS
+      IPDS(01)=ILPDS    ! LENGTH OF PDS
+      IPDS(02)=IPTV     ! PARAMETER TABLE VERSION ID
+      IPDS(03)=ICEN     ! CENTER ID
+      IPDS(04)=IGEN     ! GENERATING MODEL ID
+      IPDS(05)=IGRID    ! GRID ID
+      IPDS(06)=1        ! GDS FLAG
+      IPDS(07)=IBMS     ! BMS FLAG
+      IPDS(08)=IPU      ! PARAMETER UNIT ID
+      IPDS(09)=ITL      ! TYPE OF LEVEL ID
+      IPDS(10)=IL1      ! LEVEL 1 OR 0
+      IPDS(11)=IL2      ! LEVEL 2
+      IPDS(12)=IYR      ! YEAR
+      IPDS(13)=IMO      ! MONTH
+      IPDS(14)=IDY      ! DAY
+      IPDS(15)=IHR      ! HOUR
+      IPDS(16)=0        ! MINUTE
+      IPDS(17)=IFTU     ! FORECAST TIME UNIT ID
+      IPDS(18)=JP1      ! TIME PERIOD 1
+      IPDS(19)=JP2      ! TIME PERIOD 2 OR 0
+      IPDS(20)=JTR      ! TIME RANGE INDICATOR
+      IPDS(21)=INA      ! NUMBER IN AVERAGE
+      IPDS(22)=INM      ! NUMBER MISSING
+c     IPDS(23)=20       ! CENTURY
+      IPDS(23)=ICENTURY ! CENTURY
+
+      IPDS(24)=ICEN2    ! FORECAST SUBCENTER
+      IPDS(25)=IDS      ! DECIMAL SCALING
+C - - - - - - - - - - - - - - - - - - - - - - - - - - - - - - - - - - -
+C  FILL GDS AND BDS PARAMETERS
+      IGDS(01)=0        ! NUMBER OF VERTICAL COORDS
+      IGDS(02)=255      ! VERTICAL COORD FLAG
+      IGDS(03)=IDRT     ! DATA REPRESENTATION TYPE
+      IGDS(04)=IM       ! EAST-WEST POINTS
+      IGDS(05)=JM       ! NORTH-SOUTH POINTS
+      IGDS(06)=LAT1     ! LATITUDE OF ORIGIN
+      IGDS(07)=LON1     ! LONGITUDE OF ORIGIN
+      IGDS(08)=IRESFL   ! RESOLUTION FLAG
+      IGDS(09)=IGDS09   ! LATITUDE OF END OR ORIENTATION
+      IGDS(10)=IGDS10   ! LONGITUDE OF END OR DX IN METER ON 60N
+      IGDS(11)=IGDS11   ! LAT INCREMENT OR GAUSSIAN LATS OR DY IN METER
+      IGDS(12)=IGDS12   ! LONGITUDE INCREMENT OR PROJECTION
+      IGDS(13)=ISCAN    ! SCANNING MODE FLAGS
+c     IGDS(14:18)=0     ! NOT USED
+	call ifill(igds(14),5,0)
+c     IBDS(1:9)=0       ! BDS FLAGS
+	call ifill(ibds,9,0)
+C - - - - - - - - - - - - - - - - - - - - - - - - - - - - - - - - - - -
+C  FILL BITMAP AND COUNT VALID DATA.  RESET BITMAP FLAG IF ALL VALID.
+      NBM=NF
+      IF(IBMS.NE.0) THEN
+        NBM=0
+        DO I=1,NF
+          IF(LBM(I)) THEN
+            IBM(I)=1
+            NBM=NBM+1
+          ELSE
+            IBM(I)=0
+          ENDIF
+        ENDDO
+        IF(NBM.EQ.NF) IPDS(7)=0
+      ENDIF
+C - - - - - - - - - - - - - - - - - - - - - - - - - - - - - - - - - - -
+C  ROUND DATA AND DETERMINE NUMBER OF BITS
+      IF(NBM.EQ.0) THEN
+        DO I=1,NF
+          FR(I)=0.
+        ENDDO
+        NBIT=0
+      ELSE
+        CALL GTBITS(IPDS(7),IDS,NF,IBM,F,FR,FMIN,FMAX,NBIT)
+        IF(MXBIT.GT.0) NBIT=MIN(NBIT,MXBIT)
+      ENDIF
+C - - - - - - - - - - - - - - - - - - - - - - - - - - - - - - - - - - -
+C  CREATE GRIB MESSAGE
+      CALL W3FI72(0,FR,0,NBIT,0,IPDS,PDS,
+     &            1,255,IGDS,0,0,IBM,NF,IBDS,
+     &            NFO,GRIB,LGRIB,IERR)
+C - - - - - - - - - - - - - - - - - - - - - - - - - - - - - - - - - - -
+      RETURN
+      END
+C-----------------------------------------------------------------------
+CFPP$ NOCONCUR R
+      SUBROUTINE GTBITS(IBM,IDS,LEN,MG,G,GROUND,GMIN,GMAX,NBIT)
+C$$$  SUBPROGRAM DOCUMENTATION BLOCK
+C
+C SUBPROGRAM:    GTBITS      COMPUTE NUMBER OF BITS AND ROUND FIELD.
+C   PRGMMR: IREDELL          ORG: W/NMC23    DATE: 92-10-31
+C
+C ABSTRACT: THE NUMBER OF BITS REQUIRED TO PACK A GIVEN FIELD
+C   AT A PARTICULAR DECIMAL SCALING IS COMPUTED USING THE FIELD RANGE.
+C   THE FIELD IS ROUNDED OFF TO THE DECIMAL SCALING FOR PACKING.
+C   THE MINIMUM AND MAXIMUM ROUNDED FIELD VALUES ARE ALSO RETURNED.
+C   GRIB BITMAP MASKING FOR VALID DATA IS OPTIONALLY USED.
+C
+C PROGRAM HISTORY LOG:
+C   92-10-31  IREDELL
+C
+C USAGE:    CALL GTBITS(IBM,IDS,LEN,MG,G,GMIN,GMAX,NBIT)
+C   INPUT ARGUMENT LIST:
+C     IBM      - INTEGER BITMAP FLAG (=0 FOR NO BITMAP)
+C     IDS      - INTEGER DECIMAL SCALING
+C                (E.G. IDS=3 TO ROUND FIELD TO NEAREST MILLI-VALUE)
+C     LEN      - INTEGER LENGTH OF THE FIELD AND BITMAP
+C     MG       - INTEGER (LEN) BITMAP IF IBM=1 (0 TO SKIP, 1 TO KEEP)
+C     G        - REAL (LEN) FIELD
+C
+C   OUTPUT ARGUMENT LIST:
+C     GROUND   - REAL (LEN) FIELD ROUNDED TO DECIMAL SCALING
+C                (SET TO ZERO WHERE BITMAP IS 0 IF IBM=1)
+C     GMIN     - REAL MINIMUM VALID ROUNDED FIELD VALUE
+C     GMAX     - REAL MAXIMUM VALID ROUNDED FIELD VALUE
+C     NBIT     - INTEGER NUMBER OF BITS TO PACK
+C
+C SUBPROGRAMS CALLED:
+C   ISRCHNE  - FIND FIRST VALUE IN AN ARRAY NOT EQUAL TO TARGET VALUE
+C
+C ATTRIBUTES:
+C   LANGUAGE: CRAY FORTRAN
+C
+C$$$
+      DIMENSION MG(LEN),G(LEN),GROUND(LEN)
+C - - - - - - - - - - - - - - - - - - - - - - - - - - - - - - - - - - -
+C  ROUND FIELD AND DETERMINE EXTREMES WHERE BITMAP IS ON
+      DS=10.**IDS
+      IF(IBM.EQ.0) THEN
+        GROUND(1)=NINT(G(1)*DS)/DS
+        GMAX=GROUND(1)
+        GMIN=GROUND(1)
+        DO I=2,LEN
+          GROUND(I)=NINT(G(I)*DS)/DS
+          GMAX=MAX(GMAX,GROUND(I))
+          GMIN=MIN(GMIN,GROUND(I))
+        ENDDO
+      ELSE
+        I1=ISRCHNE(LEN,MG,1,0)
+        IF(I1.GT.0.AND.I1.LE.LEN) THEN
+          DO I=1,I1-1
+            GROUND(I)=0.
+          ENDDO
+          GROUND(I1)=NINT(G(I1)*DS)/DS
+          GMAX=GROUND(I1)
+          GMIN=GROUND(I1)
+          DO I=I1+1,LEN
+            IF(MG(I).NE.0) THEN
+              GROUND(I)=NINT(G(I)*DS)/DS
+              GMAX=MAX(GMAX,GROUND(I))
+              GMIN=MIN(GMIN,GROUND(I))
+            ELSE
+              GROUND(I)=0.
+            ENDIF
+          ENDDO
+        ELSE
+          DO I=1,LEN
+            GROUND(I)=0.
+          ENDDO
+          GMAX=0.
+          GMIN=0.
+        ENDIF
+      ENDIF
+C - - - - - - - - - - - - - - - - - - - - - - - - - - - - - - - - - - -
+C  COMPUTE NUMBER OF BITS
+      NBIT=LOG((GMAX-GMIN)*DS+0.9)/LOG(2.)+1.
+C - - - - - - - - - - - - - - - - - - - - - - - - - - - - - - - - - - -
+      RETURN
+      END
+C-----------------------------------------------------------------------
+      SUBROUTINE RDSGH(NSIG,FHOUR,IDATE,SI,SL,
+     &                 JCAP,LEVS,ITRUN,IORDER,IREALF,IGEN,
+     &                 LATB2,LONB2,LONB22,NFLDS,NWHDR,NWFLD,
+     &                 NC,NCTOP,IRET)
+C$$$  SUBPROGRAM DOCUMENTATION BLOCK
+C
+C SUBPROGRAM:    RDSGH       READ SIGMA FILE HEADER RECORD
+C   PRGMMR: IREDELL          ORG: W/NMC23     DATE: 92-10-31
+C
+C ABSTRACT: READS THE HEADER RECORD FROM THE SIGMA FILE.
+C
+C PROGRAM HISTORY LOG:
+C   91-10-31  MARK IREDELL
+C
+C USAGE:      CALL RDSGH(NSIG,FHOUR,IDATE,SI,SL,
+C    &                   JCAP,LEVS,ITRUN,IORDER,IREALF,IGEN,
+C    &                   LATB2,LONB2,LONB22,NFLDS,NWHDR,NWFLD,
+C    &                   NC,NCTOP,IRET)
+C
+C   INPUT ARGUMENT LIST:
+C     NSIG     - INTEGER UNIT FROM WHICH TO READ HEADER
+C
+C   OUTPUT ARGUMENT LIST:
+C     FHOUR    - REAL FORECAST HOUR
+C     IDATE    - INTEGER (4) DATE
+C     SI       - REAL (LEVS+1) SIGMA INTERFACES
+C     SL       - REAL (LEVS) SIGMA LEVELS
+C     JCAP     - INTEGER SPECTRAL TRUNCATION
+C     LEVS     - INTEGER NUMBER OF LEVELS
+C     ITRUN    - INTEGER TRUNCATION FLAG (=1 FOR TRIANGULAR)
+C     IORDER   - INTEGER COEFFICIENT ORDER FLAG (=2 FOR IBM ORDER)
+C     IREALF   - INTEGER FLOATING POINT FLAG (=1 FOR IBM)
+C     IGEN     - INTEGER MODEL GENERATING FLAG
+C     LATB2    - INTEGER NUMBER OF LATITUDE PAIRS IN GAUSSIAN GRID
+C                (=(JCAP+1)*3/4)
+C     LONB2    - INTEGER NUMBER OF VALID DATA POINTS PER LATITUDE PAIR
+C                (>=(JCAP+1)*6 APPROPRIATE FOR FFT)
+C     LONB22   - INTEGER NUMBER OF TOTAL POINTS PER LATITUDE PAIR
+C                (=LONB2+6)
+C     NFLDS    - INTEGER NUMBER OF DATA FIELDS PER GRIDPOINT
+C     NWHDR    - INTEGER NUMBER OF WORDS IN THE HEADER RECORD
+C     NWFLD    - INTEGER NUMBER OF WORDS IN EACH DATA RECORD
+C     NC       - INTEGER NUMBER OF SPECTRAL COEFFICIENTS
+C     NCTOP    - INTEGER NUMBER OF SPECTRAL COEFFICIENTS
+C     IRET     - INTEGER RETURN CODE (=0 FOR OK, =1 FOR EOF, =2 FOR ERR)
+C
+C   INPUT FILES:
+C     NSIG     - SIGMA FILE
+C
+C SUBPROGRAMS CALLED:
+C   MAXFAC       RETURN MAXIMUM PRIME FACTOR
+C
+C ATTRIBUTES:
+C   LANGUAGE: CRAY FORTRAN
+C
+C$$$
+      PARAMETER(LEVMAX=100,NWEXT=512-(6+2*LEVMAX))
+      CHARACTER*32 CLABE
+      DIMENSION IDATE(4)
+      integer*4 idate4(4)
+      DIMENSION SI(LEVMAX+1),SL(LEVMAX),SISL(2*LEVMAX+1),EXT(NWEXT)
+C - - - - - - - - - - - - - - - - - - - - - - - - - - - - - - - - - - -
+C  READ AND EXTRACT HEADER RECORD
+C  READ SIGMA SPECTRAL FILE HEADER AND DETERMINE GAUSSIAN GRID
+      IRET=0
+      READ(NSIG,END=91,ERR=92) CLABE
+c     READ(NSIG,END=91,ERR=92) FHOUR,IDATE,SISL,(EXT(I),I=1,6)
+      READ(NSIG,END=91,ERR=92) FHOUR,idate4,SISL,(EXT(I),I=1,6)
+	write(*,*) 'idate=',idate4
+      if (idate4(4).lt.100) idate4(4) = idate4(4) + 1900
+      IDATE(1) = idate4(1)
+      IDATE(2) = idate4(2)
+      IDATE(3) = idate4(3)
+      IDATE(4) = idate4(4)
+      JCAP  =EXT(1)
+      LEVS  =EXT(2)
+      ITRUN =EXT(3)
+      IORDER=EXT(4)
+      IREALF=EXT(5)
+      IGEN  =EXT(6)
+      LATB2=(JCAP+1)*3/4
+      LONB2=(JCAP+1)*6
+      LONB2=((LONB2-1)/4+1)*4
+      DOWHILE(MAXFAC(LONB2).GT.5)
+        LONB2=LONB2+4
+      ENDDO
+      LONB22=LONB2+6
+      NFLDS =6*LEVS+6
+      NWHDR =212
+      NWFLD =2+LONB22*NFLDS
+c     SI(1:LEVS+1)=SISL(1:LEVS+1)
+	do i = 1, levs+1
+	    si(i) = sisl(i)
+	enddo
+c     SL(1:LEVS)=SISL(LEVS+2:2*LEVS+1)
+	do i = 1, levs
+	    sl(i) = sisl(levs+1+i)
+	enddo
+      NC=(JCAP+1)*(JCAP+2)+1
+      NCTOP=2*(JCAP+1)
+      RETURN
+C - - - - - - - - - - - - - - - - - - - - - - - - - - - - - - - - - - -
+C  END OF FILE ENCOUNTERED
+91    IRET=1
+      RETURN
+C - - - - - - - - - - - - - - - - - - - - - - - - - - - - - - - - - - -
+C  I/O ERROR ENCOUNTERED
+92    IRET=2
+      RETURN
+C - - - - - - - - - - - - - - - - - - - - - - - - - - - - - - - - - - -
+      END
+C-----------------------------------------------------------------------
+      FUNCTION MAXFAC(N)
+C$$$  SUBPROGRAM DOCUMENTATION BLOCK
+C
+C SUBPROGRAM:    MAXFAC      RETURN MAXIMUM PRIME FACTOR
+C   PRGMMR: IREDELL          ORG: W/NMC23     DATE: 92-10-31
+C
+C ABSTRACT: DETERMINES THE MAXIMUM PRIME FACTOR OF A POSITIVE INTEGER.
+C           USEFUL FOR DETERMINING FITNESS FOR FFT FACTORIZATION.
+C
+C PROGRAM HISTORY LOG:
+C   91-10-31  MARK IREDELL
+C
+C USAGE:   ...=MAXFAC(N)
+C
+C   INPUT ARGUMENT LIST:
+C     N        - INTEGER NUMBER TO FACTOR
+C
+C   OUTPUT ARGUMENT LIST:
+C     MAXFAC   - MAXIMUM PRIME FACTOR OF N
+C
+C ATTRIBUTES:
+C   LANGUAGE: CRAY FORTRAN
+C
+C$$$
+C - - - - - - - - - - - - - - - - - - - - - - - - - - - - - - - - - - -
+      IN=N
+      K=2
+      M=1
+      DOWHILE(IN.GT.1)
+        INX=IN/K
+        IF(IN.EQ.INX*K) THEN
+          IN=INX
+          M=K
+        ELSE
+          K=K+1
+          IF(K.GT.3) K=K+1
+          IF(K.GT.INX) K=IN
+        ENDIF
+      ENDDO
+      MAXFAC=M
+C - - - - - - - - - - - - - - - - - - - - - - - - - - - - - - - - - - -
+      RETURN
+      END
+C-----------------------------------------------------------------------
+      SUBROUTINE RDSS(NSS,JCAP,NC,NCTOP,LATB2,LONB2,LEVS,SL,
+     &                CLAT,SLAT,WLAT,TRIG,IFAX,EPS,EPSTOP,SS,SSTOP)
+C$$$  SUBPROGRAM DOCUMENTATION BLOCK
+C
+C SUBPROGRAM:    RDSS        READ DATA FROM A SIGMA SPECTRAL FILE
+C   PRGMMR: IREDELL          ORG: W/NMC23     DATE: 92-10-31
+C
+C ABSTRACT: READS THE RECORDS OF OROGRAPHY, SURFACE PRESSURE,
+C           DIVERGENCE AND VORTICITY, TEMPERATURE AND HUMIDITY
+C           FROM A SIGMA SPECTRAL FILE.  IT IS ASSUMED THAT THE FIRST
+C           TWO HEADER RECORDS OF THE FILE HAVE ALREADY BEEN READ.
+C           THE GRADIENTS OF OROGRAPHY AND LOG SURFACE PRESSURE
+C           AND THE WIND COMPONENTS ARE ALSO COMPUTED IN SPECTRAL SPACE.
+C           ALSO, SOME SPECTRAL TRANSFORM UTILITY FIELDS ARE COMPUTED.
+C           SUBPROGRAM TRSS SHOULD BE USED TO TRANSFORM TO GRID
+C           AS WELL AS COMPUTE DRY TEMPERATURE AND SURFACE PRESSURE
+C           AND WINDS AND GRADIENTS WITHOUT A COSINE LATITUDE FACTOR.
+C
+C PROGRAM HISTORY LOG:
+C   91-10-31  MARK IREDELL
+C
+C USAGE:    CALL RDSS(NSS,JCAP,NC,NCTOP,LATB2,LONB2,LEVS,SL,
+C   &                 CLAT,SLAT,WLAT,TRIG,IFAX,EPS,EPSTOP,SS,SSTOP)
+C
+C   INPUT ARGUMENT LIST:
+C     NSS      - INTEGER UNIT FROM WHICH TO READ FILE
+C     JCAP     - INTEGER SPECTRAL TRUNCATION
+C     NC       - INTEGER NUMBER OF SPECTRAL COEFFICIENTS
+C     NCTOP    - INTEGER NUMBER OF SPECTRAL COEFFICIENTS OVER TOP
+C     LATB2    - INTEGER NUMBER OF LATITUDE PAIRS IN GAUSSIAN GRID
+C     LONB2    - INTEGER NUMBER OF VALID DATA POINTS PER LATITUDE PAIR
+C     LEVS     - INTEGER NUMBER OF LEVELS
+C     SL       - REAL (LEVS) SIGMA FULL LEVEL VALUES
+C
+C   OUTPUT ARGUMENT LIST:
+C     CLAT     - REAL (LATB2) COSINES OF LATITUDE
+C     SLAT     - REAL (LATB2) SINES OF LATITUDE
+C     WLAT     - REAL (LATB2) GAUSSIAN WEIGHTS
+C     TRIG     - REAL (LONB2) TRIGONOMETRIC QUANTITIES FOR THE FFT
+C     IFAX     - INTEGER (20) FACTORS FOR THE FFT
+C     EPS      - REAL ((JCAP+1)*(JCAP+2)/2) SQRT((N**2-L**2)/(4*N**2-1))
+C     EPSTOP   - REAL (JCAP+1) SQRT((N**2-L**2)/(4*N**2-1)) OVER TOP
+C     SS       - REAL (NC,6*LEVS+6) SPECTRAL COEFS
+C     SSTOP    - REAL (NCTOP,6*LEVS+6) SPECTRAL COEFS OVER TOP
+C                (:,1:LEVS)             VORTICITY
+C                (:,LEVS+1:2*LEVS)      DIVERGENCE
+C                (:,2*LEVS+1:3*LEVS)    TEMPERATURE
+C                (:,3*LEVS+1:4*LEVS)    SPECIFIC HUMIDITY
+C                (:,4*LEVS+1)           D(LNPS)/DX
+C                (:,4*LEVS+2)           D(LNPS)/DY
+C                (:,4*LEVS+3:5*LEVS+2)  ZONAL WIND
+C                (:,5*LEVS+3:6*LEVS+2)  MERIDIONAL WIND
+C                (:,6*LEVS+3)           SURFACE PRESSURE
+C                (:,6*LEVS+4)           OROGRAPHY
+C                (:,6*LEVS+5)           D(OROG)/DX
+C                (:,6*LEVS+6)           D(OROG)/DY
+C
+C   INPUT FILES:
+C     NSS      - SIGMA SPECTRAL FILE
+C
+C SUBPROGRAMS CALLED:
+C   ELAT         COMPUTE LATITUDES
+C   FFTFAX       COMPUTE UTILITY FIELDS FOR FFT
+C   GSPC         COMPUTE UTILITY FIELDS FOR SPECTRAL TRANSFORM
+C   GRADQ        COMPUTE GRADIENT IN SPECTRAL SPACE
+C   DZ2UV        COMPUTE VECTOR COMPONENTS IN SPECTRAL SPACE
+C
+C ATTRIBUTES:
+C   LANGUAGE: CRAY FORTRAN
+C
+C$$$
+      DIMENSION SL(LEVS)
+      DIMENSION CLAT(LATB2),SLAT(LATB2),WLAT(LATB2),TRIG(LONB2),IFAX(20)
+      REAL EPS((JCAP+1)*(JCAP+2)/2),EPSTOP(JCAP+1)
+      REAL SS(NC,6*LEVS+6),SSTOP(NCTOP,6*LEVS+6)
+      REAL ENN1((JCAP+1)*(JCAP+2)),ELONN1((JCAP+1)*(JCAP+2)/2)
+      REAL EON((JCAP+1)*(JCAP+2)/2),EONTOP(JCAP+1)
+      PARAMETER(G= 9.8000E+0 ,RD= 2.8705E+2 )
+C - - - - - - - - - - - - - - - - - - - - - - - - - - - - - - - - - - -
+C  COMPUTE UTILITY FIELDS
+      CALL ELAT(LATB2,SLAT,CLAT,WLAT)
+      CALL FFTFAX(LONB2/2,IFAX,TRIG)
+      CALL GSPC(JCAP,EPS,EPSTOP,ENN1,ELONN1,EON,EONTOP)
+C - - - - - - - - - - - - - - - - - - - - - - - - - - - - - - - - - - -
+C  READ SIGMA SPECTRAL DATA
+      NR=(JCAP+1)*(JCAP+2)
+      READ(NSS) (SS(I,6*LEVS+4),I=1,NR)
+      READ(NSS) (SS(I,6*LEVS+3),I=1,NR)
+      DO K=1,LEVS
+        READ(NSS) (SS(I,2*LEVS+K),I=1,NR)
+      ENDDO
+      DO K=1,LEVS
+        READ(NSS) (SS(I,LEVS+K),I=1,NR)
+        READ(NSS) (SS(I,K),I=1,NR)
+      ENDDO
+      DO K=1,LEVS
+        READ(NSS) (SS(I,3*LEVS+K),I=1,NR)
+      ENDDO
+      DO K=1,6*LEVS+6
+        DO L=0,JCAP
+          SSTOP(2*L+1,K)=0.
+          SSTOP(2*L+2,K)=0.
+        ENDDO
+      ENDDO
+C - - - - - - - - - - - - - - - - - - - - - - - - - - - - - - - - - - -
+C  COMPUTE GRADIENTS AND WINDS
+      CALL GRADQ(JCAP,ENN1,ELONN1,EON,EONTOP,SS(1,6*LEVS+4),
+     &           SS(1,6*LEVS+5),SS(1,6*LEVS+6),SSTOP(1,6*LEVS+6))
+      CALL GRADQ(JCAP,ENN1,ELONN1,EON,EONTOP,SS(1,6*LEVS+3),
+     &           SS(1,4*LEVS+1),SS(1,4*LEVS+2),SSTOP(1,4*LEVS+2))
+      DO K=1,LEVS
+        CALL DZ2UV(JCAP,ENN1,ELONN1,EON,EONTOP,SS(1,LEVS+K),SS(1,K),
+     &             SS(1,4*LEVS+2+K),SS(1,5*LEVS+2+K),
+     &             SSTOP(1,4*LEVS+2+K),SSTOP(1,5*LEVS+2+K))
+      ENDDO
+C - - - - - - - - - - - - - - - - - - - - - - - - - - - - - - - - - - -
+      RETURN
+      END
+C-----------------------------------------------------------------------
+      SUBROUTINE TRSS(JCAP,NC,NCTOP,LEVS,TRIG,IFAX,EPS,EPSTOP,SS,SSTOP,
+     &                LONB2,LONB22,COSLAT,SINLAT,F)
+C$$$  SUBPROGRAM DOCUMENTATION BLOCK
+C
+C SUBPROGRAM:    TRSS        TRANSFORM SPECTRAL TO GRID
+C   PRGMMR: IREDELL          ORG: W/NMC23     DATE: 92-10-31
+C
+C ABSTRACT: TRANSFORMS SPECTRAL TO GRIDDED DATA ON A LATITUDE PAIR
+C           AND COMPUTES DRY TEMPERATURE AND SURFACE PRESSURE
+C           AND WINDS AND GRADIENTS WITHOUT A COSINE LATITUDE FACTOR.
+C           SUBPROGRAM RDSS SHOULD BE CALLED ALREADY
+C           TO READ SPECTRAL DATA AND INITIALIZE UTILITY FIELDS.
+C           THIS SUBPROGRAM CAN BE CALLED FROM A MULTIPROCESSED SEGMENT.
+C
+C PROGRAM HISTORY LOG:
+C   91-10-31  MARK IREDELL
+C
+C USAGE:    CALL TRSS(JCAP,NC,NCTOP,LEVS,TRIG,IFAX,EPS,EPSTOP,SS,SSTOP,
+C    &                LONB2,LONB22,COSLAT,SINLAT,F)
+C
+C   INPUT ARGUMENT LIST:
+C     JCAP     - INTEGER SPECTRAL TRUNCATION
+C     NC       - INTEGER NUMBER OF SPECTRAL COEFFICIENTS
+C     NCTOP    - INTEGER NUMBER OF SPECTRAL COEFFICIENTS OVER TOP
+C     LEVS     - INTEGER NUMBER OF LEVELS
+C     TRIG     - REAL (LONB2) TRIGONOMETRIC QUANTITIES FOR THE FFT
+C     IFAX     - INTEGER (20) FACTORS FOR THE FFT
+C     EPS      - REAL ((JCAP+1)*(JCAP+2)/2) SQRT((N**2-L**2)/(4*N**2-1))
+C     EPSTOP   - REAL (JCAP+1) SQRT((N**2-L**2)/(4*N**2-1)) OVER TOP
+C     SS       - REAL (NC,6*LEVS+6) SPECTRAL COEFS
+C     SSTOP    - REAL (NCTOP,6*LEVS+6) SPECTRAL COEFS OVER TOP
+C     LONB2    - INTEGER NUMBER OF VALID DATA POINTS PER LATITUDE PAIR
+C     LONB22   - INTEGER LONGITUDE DIMENSION OF DATA (>=LONB2+4)
+C     COSLAT   - REAL COSINE OF LATITUDE OF THE LATITUDE PAIR
+C     SINLAT   - REAL SINE OF LATITUDE OF THE NORTHERN LATITUDE
+C
+C   OUTPUT ARGUMENT LIST:
+C     F        - REAL (LONB22,6*LEVS+6) GRIDDED DATA
+C                (LONB2/2 NH POINTS FOLLOWED BY LONB2/2 SH POINTS)
+C                (:,1:LEVS)             VORTICITY
+C                (:,LEVS+1:2*LEVS)      DIVERGENCE
+C                (:,2*LEVS+1:3*LEVS)    TEMPERATURE
+C                (:,3*LEVS+1:4*LEVS)    SPECIFIC HUMIDITY
+C                (:,4*LEVS+1)           D(LNPS)/DX
+C                (:,4*LEVS+2)           D(LNPS)/DY
+C                (:,4*LEVS+3:5*LEVS+2)  ZONAL WIND
+C                (:,5*LEVS+3:6*LEVS+2)  MERIDIONAL WIND
+C                (:,6*LEVS+3)           SURFACE PRESSURE
+C                (:,6*LEVS+4)           OROGRAPHY
+C                (:,6*LEVS+5)           D(OROG)/DX
+C                (:,6*LEVS+6)           D(OROG)/DY
+C
+C SUBPROGRAMS CALLED:
+C   PLEG         COMPUTE ASSOCIATED LEGENDRE POLYNOMIALS
+C   PSYNTH       SYNTHESIZE FOURIER FROM SPECTRAL COEFFICIENTS
+C   PLEGP        COMPUTE ASSOCIATED LEGENDRE POLYNOMIALS
+C   PSYNTHP      SYNTHESIZE FOURIER FROM SPECTRAL COEFFICIENTS
+C   RFFTMLT      FAST FOURIER TRANSFORM
+C
+C ATTRIBUTES:
+C   LANGUAGE: CRAY FORTRAN
+C
+C$$$
+      DIMENSION TRIG(LONB2),IFAX(20)
+      REAL EPS((JCAP+1)*(JCAP+2)/2),EPSTOP(JCAP+1)
+      REAL SS(NC,6*LEVS+6),SSTOP(NCTOP,6*LEVS+6)
+      REAL F(LONB22,6*LEVS+6)
+      REAL PLN((JCAP+1)*(JCAP+2)/2),PLNTOP(JCAP+1)
+      REAL WFFT(LONB2,2*(6*LEVS+6))
+      INTEGER MPF(6*LEVS+6)
+      PARAMETER(FV= 4.6150E+2 / 2.8705E+2 -1.)
+C - - - - - - - - - - - - - - - - - - - - - - - - - - - - - - - - - - -
+C  SET UP PARAMETERS
+      IS=LONB2/2
+      IS2=LONB22/2
+c     MPF=0
+	call ifill(mpf,6*levs+6,0)
+      MPF(4*LEVS+1)=1
+      MPF(4*LEVS+2)=1
+c     MPF(4*LEVS+3:5*LEVS+2)=1
+c     MPF(5*LEVS+3:6*LEVS+2)=1
+	do i = 1, levs
+	    mpf(4*levs+2+i) = 1
+	    mpf(5*levs+2+i) = 1
+	enddo
+      MPF(6*LEVS+5)=1
+      MPF(6*LEVS+6)=1
+C - - - - - - - - - - - - - - - - - - - - - - - - - - - - - - - - - - -
+C  TRANSFORM SPECTRAL COEFFICIENTS TO FOURIER COEFFICIENTS OVER POLE
+      IF(COSLAT.EQ.0.) THEN
+        CALL PLEGP(JCAP,EPS,EPSTOP,PLN,PLNTOP)
+        CALL PSYNTHP(JCAP,IS2,NC,NCTOP,6*LEVS+6,PLN,PLNTOP,
+     &               MPF,SS,SSTOP,F)
+C - - - - - - - - - - - - - - - - - - - - - - - - - - - - - - - - - - -
+C  TRANSFORM SPECTRAL COEFFICIENTS TO FOURIER COEFFICIENTS
+      ELSE
+        CALL PLEG(JCAP,SINLAT,COSLAT,EPS,EPSTOP,PLN,PLNTOP)
+        CALL PSYNTH(JCAP,IS2,NC,NCTOP,6*LEVS+6,PLN,PLNTOP,SS,SSTOP,F)
+C  DIVIDE GRADIENTS AND WINDS BY COSINE OF LATITUDE.
+        DO K=1,6*LEVS+6
+          IF(MPF(K).EQ.1) THEN
+            DO I=1,2*JCAP+2
+              F(I,K)=F(I,K)/COSLAT
+              F(IS2+I,K)=F(IS2+I,K)/COSLAT
+            ENDDO
+          ENDIF
+        ENDDO
+      ENDIF
+C - - - - - - - - - - - - - - - - - - - - - - - - - - - - - - - - - - -
+C  TRANSFORM FOURIER COEFFICIENTS TO GRIDDED DATA
+      CALL RFFTMLT(F,WFFT,TRIG,IFAX,1,IS2,IS,2*(6*LEVS+6),1)
+C - - - - - - - - - - - - - - - - - - - - - - - - - - - - - - - - - - -
+C  MOVE SOUTHERN HEMISPHERE LATITUDE AFTER NORTHERN HEMISPHERE LATITUDE
+      DO K=1,6*LEVS+6
+        DO I=1,IS
+          F(IS+I,K)=F(IS2+I,K)
+        ENDDO
+      ENDDO
+C - - - - - - - - - - - - - - - - - - - - - - - - - - - - - - - - - - -
+C  COMPUTE DRY TEMPERATURE FROM VIRTUAL TEMPERATURE
+C  AND SURFACE PRESSURE FROM LOG SURFACE PRESSURE
+      DO K=1,LEVS
+        DO I=1,LONB2
+          F(I,2*LEVS+K)=F(I,2*LEVS+K)/(1.+FV*F(I,3*LEVS+K))
+        ENDDO
+      ENDDO
+      DO I=1,LONB2
+        F(I,6*LEVS+3)=EXP(F(I,6*LEVS+3))
+      ENDDO
+C - - - - - - - - - - - - - - - - - - - - - - - - - - - - - - - - - - -
+      RETURN
+      END
+C-----------------------------------------------------------------------
+      SUBROUTINE ELAT(JH,SLAT,CLAT,WLAT)
+C$$$  SUBPROGRAM DOCUMENTATION BLOCK
+C
+C SUBPROGRAM:    ELAT        COMPUTE EQUALLY-SPACED LATITUDE FUNCTIONS
+C   PRGMMR: IREDELL          ORG: W/NMC23     DATE: 92-10-31
+C
+C ABSTRACT: COMPUTES SINES AND COSINES AND GAUSSIAN WEIGHTS
+C           OF EQUALLY-SPACED LATITUDES FROM POLE TO EQUATOR.
+C           THE WEIGHTS ARE COMPUTED BASED ON ELLSAESSER (JAM,1966).
+C
+C PROGRAM HISTORY LOG:
+C   91-10-31  MARK IREDELL
+C   93-12-28  IREDELL  MODIFIED WEIGHTS BASED ON ELLSAESSER
+C
+C USAGE:    CALL ELAT(JH,SLAT,CLAT,WLAT)
+C
+C   INPUT ARGUMENT LIST:
+C     JH       - INTEGER NUMBER OF LATITUDES IN A HEMISPHERE
+C
+C   OUTPUT ARGUMENT LIST:
+C     SLAT     - REAL (JH) SINES OF LATITUDE
+C     CLAT     - REAL (JH) COSINES OF LATITUDE
+C     WLAT     - REAL (JH) GAUSSIAN WEIGHTS
+C
+C SUBPROGRAMS CALLED:
+C   MINV         SOLVES FULL MATRIX PROBLEM
+C
+C ATTRIBUTES:
+C   LANGUAGE: CRAY FORTRAN
+C
+C$$$
+      DIMENSION SLAT(JH),CLAT(JH),WLAT(JH)
+      DIMENSION AWORK(JH-1,JH),BWORK(JH*2)
+      PARAMETER(PI=3.14159265358979)
+C - - - - - - - - - - - - - - - - - - - - - - - - - - - - - - - - - - -
+      DLAT=0.5*PI/(JH-1)
+      SLAT(1)=1.
+      CLAT(1)=0.
+      DO J=2,JH-1
+        SLAT(J)=COS((J-1)*DLAT)
+        CLAT(J)=SIN((J-1)*DLAT)
+      ENDDO
+      SLAT(JH)=0.
+      CLAT(JH)=1.
+      DO JS=1,JH-1
+        DO J=2,JH
+          AWORK(JS,J-1)=COS(2*(JS-1)*(J-1)*DLAT)
+        ENDDO
+      ENDDO
+      DO JS=1,JH-1
+        AWORK(JS,JH)=-1./(4*(JS-1)**2-1)
+      ENDDO
+      CALL MINV(AWORK,JH-1,JH-1,BWORK,DA,1.E-12,1,0)
+      WLAT(1)=0.
+      DO J=2,JH
+        WLAT(J)=AWORK(J-1,JH)
+      ENDDO
+      RETURN
+      END
+C-----------------------------------------------------------------------
+      SUBROUTINE GSPC(M,EPS,EPSTOP,ENN1,ELONN1,EON,EONTOP)
+C$$$  SUBPROGRAM DOCUMENTATION BLOCK
+C
+C SUBPROGRAM:    GSPC        COMPUTE UTILITY SPECTRAL FIELDS
+C   PRGMMR: IREDELL          ORG: W/NMC23     DATE: 92-10-31
+C
+C ABSTRACT: COMPUTES CONSTANT FIELDS INDEXED IN THE SPECTRAL TRIANGLE
+C           IN "IBM ORDER" (ZONAL WAVENUMBER IS THE SLOWER INDEX).
+C           IF L IS THE ZONAL WAVENUMBER AND N IS THE TOTAL WAVENUMBER
+C           AND A IS THE EARTH RADIUS, THEN THE FIELDS RETURNED ARE:
+C           (1) NORMALIZING FACTOR EPSILON=SQRT((N**2-L**2)/(4*N**2-1))
+C           (2) LAPLACIAN FACTOR N*(N+1)/A**2
+C           (3) ZONAL DERIVATIVE/LAPLACIAN FACTOR L/(N*(N+1))*A
+C           (4) MERIDIONAL DERIVATIVE/LAPLACIAN FACTOR EPSILON/N*A
+C
+C PROGRAM HISTORY LOG:
+C   91-10-31  MARK IREDELL
+C
+C USAGE:    CALL GSPC(M,EPS,EPSTOP,ENN1,ELONN1,EON,EONTOP)
+C
+C   INPUT ARGUMENT LIST:
+C     M        - INTEGER SPECTRAL TRUNCATION
+C
+C   OUTPUT ARGUMENT LIST:
+C     EPS      - REAL ((M+1)*(M+2)/2) SQRT((N**2-L**2)/(4*N**2-1))
+C     EPSTOP   - REAL (M+1) SQRT((N**2-L**2)/(4*N**2-1)) OVER TOP
+C     ENN1     - REAL ((M+1)*(M+2)/2) N*(N+1)/A**2
+C     ELONN1   - REAL ((M+1)*(M+2)/2) L/(N*(N+1))*A
+C     EON      - REAL ((M+1)*(M+2)/2) EPSILON/N*A
+C     EONTOP   - REAL (M+1) EPSILON/N*A OVER TOP
+C
+C ATTRIBUTES:
+C   LANGUAGE: CRAY FORTRAN
+C
+C$$$
+      REAL EPS((M+1)*(M+2)/2),EPSTOP(M+1)
+      REAL ENN1((M+1)*(M+2)/2),ELONN1((M+1)*(M+2)/2)
+      REAL EON((M+1)*(M+2)/2),EONTOP(M+1)
+      PARAMETER(RERTH=6.3712E6,RA2=1./RERTH**2)
+C - - - - - - - - - - - - - - - - - - - - - - - - - - - - - - - - - - -
+      DO L=0,M
+        ILL=L*(2*M+3-L)/2+1
+        EPS(ILL)=0.
+        ENN1(ILL)=RA2*L*(L+1)
+        ELONN1(ILL)=RERTH/(L+1)
+        EON(ILL)=0.
+      ENDDO
+      DO L=0,M
+        IS=L*(2*M+1-L)
+        IP=IS/2+1
+        DO N=L+1,M
+          EPS(IP+N)=SQRT(FLOAT(N**2-L**2)/FLOAT(4*N**2-1))
+          ENN1(IP+N)=RA2*N*(N+1)
+          ELONN1(IP+N)=RERTH*L/(N*(N+1))
+          EON(IP+N)=RERTH/N*EPS(IP+N)
+        ENDDO
+      ENDDO
+      DO L=0,M
+        EPSTOP(L+1)=SQRT(FLOAT((M+1)**2-L**2)/FLOAT(4*(M+1)**2-1))
+        EONTOP(L+1)=RERTH/(M+1)*EPSTOP(L+1)
+      ENDDO
+C - - - - - - - - - - - - - - - - - - - - - - - - - - - - - - - - - - -
+      RETURN
+      END
+C-----------------------------------------------------------------------
+      SUBROUTINE GRADQ(M,ENN1,ELONN1,EON,EONTOP,Q,
+     &                 QDX,QDY,QDYTOP)
+C$$$  SUBPROGRAM DOCUMENTATION BLOCK
+C
+C SUBPROGRAM:    GRADQ       COMPUTE GRADIENT IN SPECTRAL SPACE
+C   PRGMMR: IREDELL          ORG: W/NMC23     DATE: 92-10-31
+C
+C ABSTRACT: COMPUTES THE HORIZONTAL VECTOR GRADIENT OF A SCALAR FIELD
+C           IN SPECTRAL SPACE. SUBPROGRAM GSPC SHOULD BE CALLED ALREADY.
+C           IF L IS THE ZONAL WAVENUMBER, N IS THE TOTAL WAVENUMBER,
+C           EPS(L,N)=SQRT((N**2-L**2)/(4*N**2-1)) AND A IS EARTH RADIUS,
+C           THEN THE ZONAL GRADIENT OF Q(L,N) IS SIMPLY I*L/A*Q(L,N)
+C           WHILE THE MERIDIONAL GRADIENT OF Q(L,N) IS COMPUTED AS
+C           EPS(L,N+1)*(N+2)/A*Q(L,N+1)-EPS(L,N+1)*(N-1)/A*Q(L,N-1).
+C           EXTRA TERMS ARE COMPUTED OVER TOP OF THE SPECTRAL TRIANGLE.
+C           ADVANTAGE IS TAKEN OF THE FACT THAT EPS(L,L)=0
+C           IN ORDER TO VECTORIZE OVER THE ENTIRE SPECTRAL TRIANGLE.
+C
+C PROGRAM HISTORY LOG:
+C   91-10-31  MARK IREDELL
+C
+C USAGE:    CALL GRADQ(M,ENN1,ELONN1,EON,EONTOP,Q,
+C    &                 QDX,QDY,QDYTOP)
+C
+C   INPUT ARGUMENT LIST:
+C     M        - INTEGER SPECTRAL TRUNCATION
+C     ENN1     - REAL ((M+1)*(M+2)/2) N*(N+1)/A**2
+C     ELONN1   - REAL ((M+1)*(M+2)/2) L/(N*(N+1))*A
+C     EON      - REAL ((M+1)*(M+2)/2) EPSILON/N*A
+C     EONTOP   - REAL (M+1) EPSILON/N*A OVER TOP
+C     Q        - REAL ((M+1)*(M+2)) SCALAR FIELD
+C
+C   OUTPUT ARGUMENT LIST:
+C     QDX      - REAL ((M+1)*(M+2)) ZONAL GRADIENT (TIMES COSLAT)
+C     QDY      - REAL ((M+1)*(M+2)) MERID GRADIENT (TIMES COSLAT)
+C     QDYTOP   - REAL (2*(M+1)) MERID GRADIENT (TIMES COSLAT) OVER TOP
+C
+C ATTRIBUTES:
+C   LANGUAGE: CRAY FORTRAN
+C
+C$$$
+      REAL ENN1((M+1)*(M+2)/2),ELONN1((M+1)*(M+2)/2)
+      REAL EON((M+1)*(M+2)/2),EONTOP(M+1)
+      REAL Q((M+1)*(M+2))
+      REAL QDX((M+1)*(M+2)),QDY((M+1)*(M+2)),QDYTOP(2*(M+1))
+C - - - - - - - - - - - - - - - - - - - - - - - - - - - - - - - - - - -
+C  TAKE ZONAL AND MERIDIONAL GRADIENTS
+      I=1
+      QDX(2*I-1)=0.
+      QDX(2*I)=0.
+      QDY(2*I-1)=EON(I+1)*ENN1(I+1)*Q(2*I+1)
+      QDY(2*I)=EON(I+1)*ENN1(I+1)*Q(2*I+2)
+      DO I=2,(M+1)*(M+2)/2-1
+        QDX(2*I-1)=-ELONN1(I)*ENN1(I)*Q(2*I)
+        QDX(2*I)=ELONN1(I)*ENN1(I)*Q(2*I-1)
+        QDY(2*I-1)=EON(I+1)*ENN1(I+1)*Q(2*I+1)-EON(I)*ENN1(I-1)*Q(2*I-3)
+        QDY(2*I)=EON(I+1)*ENN1(I+1)*Q(2*I+2)-EON(I)*ENN1(I-1)*Q(2*I-2)
+      ENDDO
+      I=(M+1)*(M+2)/2
+      QDX(2*I-1)=-ELONN1(I)*ENN1(I)*Q(2*I)
+      QDX(2*I)=ELONN1(I)*ENN1(I)*Q(2*I-1)
+      QDY(2*I-1)=-EON(I)*ENN1(I-1)*Q(2*I-3)
+      QDY(2*I)=-EON(I)*ENN1(I-1)*Q(2*I-2)
+C - - - - - - - - - - - - - - - - - - - - - - - - - - - - - - - - - - -
+C  TAKE MERIDIONAL GRADIENT OVER TOP
+      DO L=0,M
+        I=L*(2*M+1-L)/2+M+1
+        QDYTOP(2*L+1)=-EONTOP(L+1)*ENN1(I)*Q(2*I-1)
+        QDYTOP(2*L+2)=-EONTOP(L+1)*ENN1(I)*Q(2*I)
+      ENDDO
+C - - - - - - - - - - - - - - - - - - - - - - - - - - - - - - - - - - -
+      RETURN
+      END
+C-----------------------------------------------------------------------
+      SUBROUTINE DZ2UV(M,ENN1,ELONN1,EON,EONTOP,D,Z,
+     &                 U,V,UTOP,VTOP)
+C$$$  SUBPROGRAM DOCUMENTATION BLOCK
+C
+C SUBPROGRAM:    DZ2UV       COMPUTE WINDS FROM DIVERGENCE AND VORTICITY
+C   PRGMMR: IREDELL          ORG: W/NMC23     DATE: 92-10-31
+C
+C ABSTRACT: COMPUTES THE WIND COMPONENTS FROM DIVERGENCE AND VORTICITY
+C           IN SPECTRAL SPACE. SUBPROGRAM GSPC SHOULD BE CALLED ALREADY.
+C           IF L IS THE ZONAL WAVENUMBER, N IS THE TOTAL WAVENUMBER,
+C           EPS(L,N)=SQRT((N**2-L**2)/(4*N**2-1)) AND A IS EARTH RADIUS,
+C           THEN THE ZONAL WIND COMPONENT U IS COMPUTED AS
+C             U(L,N)=-I*L/(N*(N+1))*A*D(L,N)
+C                    +EPS(L,N+1)/(N+1)*A*Z(L,N+1)-EPS(L,N)/N*A*Z(L,N-1)
+C           AND THE MERIDIONAL WIND COMPONENT V IS COMPUTED AS
+C             V(L,N)=-I*L/(N*(N+1))*A*Z(L,N)
+C                    -EPS(L,N+1)/(N+1)*A*D(L,N+1)+EPS(L,N)/N*A*D(L,N-1)
+C           WHERE D IS DIVERGENCE AND Z IS VORTICITY.
+C           EXTRA TERMS ARE COMPUTED OVER TOP OF THE SPECTRAL TRIANGLE.
+C           ADVANTAGE IS TAKEN OF THE FACT THAT EPS(L,L)=0
+C           IN ORDER TO VECTORIZE OVER THE ENTIRE SPECTRAL TRIANGLE.
+C
+C PROGRAM HISTORY LOG:
+C   91-10-31  MARK IREDELL
+C
+C USAGE:    CALL DZ2UV(M,ENN1,ELONN1,EON,EONTOP,D,Z,
+C    &                 U,V,UTOP,VTOP)
+C
+C   INPUT ARGUMENT LIST:
+C     M        - INTEGER SPECTRAL TRUNCATION
+C     ENN1     - REAL ((M+1)*(M+2)/2) N*(N+1)/A**2
+C     ELONN1   - REAL ((M+1)*(M+2)/2) L/(N*(N+1))*A
+C     EON      - REAL ((M+1)*(M+2)/2) EPSILON/N*A
+C     EONTOP   - REAL (M+1) EPSILON/N*A OVER TOP
+C     D        - REAL ((M+1)*(M+2)) DIVERGENCE
+C     Z        - REAL ((M+1)*(M+2)) VORTICITY
+C
+C   OUTPUT ARGUMENT LIST:
+C     U        - REAL ((M+1)*(M+2)) ZONAL WIND (TIMES COSLAT)
+C     V        - REAL ((M+1)*(M+2)) MERID WIND (TIMES COSLAT)
+C     UTOP     - REAL (2*(M+1)) ZONAL WIND (TIMES COSLAT) OVER TOP
+C     VTOP     - REAL (2*(M+1)) MERID WIND (TIMES COSLAT) OVER TOP
+C
+C ATTRIBUTES:
+C   LANGUAGE: CRAY FORTRAN
+C
+C$$$
+      REAL ENN1((M+1)*(M+2)/2),ELONN1((M+1)*(M+2)/2)
+      REAL EON((M+1)*(M+2)/2),EONTOP(M+1)
+      REAL D((M+1)*(M+2)),Z((M+1)*(M+2))
+      REAL U((M+1)*(M+2)),V((M+1)*(M+2)),UTOP(2*(M+1)),VTOP(2*(M+1))
+C - - - - - - - - - - - - - - - - - - - - - - - - - - - - - - - - - - -
+C  COMPUTE WINDS IN THE SPECTRAL TRIANGLE
+      I=1
+      U(2*I-1)=EON(I+1)*Z(2*I+1)
+      U(2*I)=EON(I+1)*Z(2*I+2)
+      V(2*I-1)=-EON(I+1)*D(2*I+1)
+      V(2*I)=-EON(I+1)*D(2*I+2)
+      DO I=2,(M+1)*(M+2)/2-1
+        U(2*I-1)=ELONN1(I)*D(2*I)+EON(I+1)*Z(2*I+1)-EON(I)*Z(2*I-3)
+        U(2*I)=-ELONN1(I)*D(2*I-1)+EON(I+1)*Z(2*I+2)-EON(I)*Z(2*I-2)
+        V(2*I-1)=ELONN1(I)*Z(2*I)-EON(I+1)*D(2*I+1)+EON(I)*D(2*I-3)
+        V(2*I)=-ELONN1(I)*Z(2*I-1)-EON(I+1)*D(2*I+2)+EON(I)*D(2*I-2)
+      ENDDO
+      I=(M+1)*(M+2)/2
+      U(2*I-1)=ELONN1(I)*D(2*I)-EON(I)*Z(2*I-3)
+      U(2*I)=-ELONN1(I)*D(2*I-1)-EON(I)*Z(2*I-2)
+      V(2*I-1)=ELONN1(I)*Z(2*I)+EON(I)*D(2*I-3)
+      V(2*I)=-ELONN1(I)*Z(2*I-1)+EON(I)*D(2*I-2)
+C - - - - - - - - - - - - - - - - - - - - - - - - - - - - - - - - - - -
+C  COMPUTE WINDS OVER TOP OF THE SPECTRAL TRIANGLE
+      DO L=0,M
+        I=L*(2*M+1-L)/2+M+1
+        UTOP(2*L+1)=-EONTOP(L+1)*Z(2*I-1)
+        UTOP(2*L+2)=-EONTOP(L+1)*Z(2*I)
+        VTOP(2*L+1)=EONTOP(L+1)*D(2*I-1)
+        VTOP(2*L+2)=EONTOP(L+1)*D(2*I)
+      ENDDO
+C - - - - - - - - - - - - - - - - - - - - - - - - - - - - - - - - - - -
+      RETURN
+      END
+C-----------------------------------------------------------------------
+      SUBROUTINE PLEG(M,SLAT,CLAT,EPS,EPSTOP,PLN,PLNTOP)
+C$$$  SUBPROGRAM DOCUMENTATION BLOCK
+C
+C SUBPROGRAM:    PLEG        COMPUTE LEGENDRE POLYNOMIALS
+C   PRGMMR: IREDELL          ORG: W/NMC23     DATE: 92-10-31
+C
+C ABSTRACT: EVALUATES THE ORTHONORMAL ASSOCIATED LEGENDRE POLYNOMIALS
+C           IN THE SPECTRAL TRIANGLE AT A GIVEN LATITUDE.
+C           SUBPROGRAM GSPC SHOULD BE CALLED ALREADY.
+C           IF L IS THE ZONAL WAVENUMBER, N IS THE TOTAL WAVENUMBER,
+C           AND EPS(L,N)=SQRT((N**2-L**2)/(4*N**2-1)) THEN
+C           THE FOLLOWING BOOTSTRAPPING FORMULAS ARE USED:
+C           PLN(0,0)=SQRT(0.5)
+C           PLN(L,L)=PLN(L-1,L-1)*CLAT*SQRT(FLOAT(2*L+1)/FLOAT(2*L))
+C           PLN(L,N)=(SLAT*PLN(L,N-1)-EPS(L,N-1)*PLN(L,N-2))/EPS(L,N)
+C
+C PROGRAM HISTORY LOG:
+C   91-10-31  MARK IREDELL
+C
+C USAGE:    CALL PLEG(M,SLAT,CLAT,EPS,EPSTOP,PLN,PLNTOP)
+C
+C   INPUT ARGUMENT LIST:
+C     M        - INTEGER SPECTRAL TRUNCATION
+C     SLAT     - REAL SINE OF LATITUDE
+C     CLAT     - REAL COSINE OF LATITUDE
+C     EPS      - REAL ((M+1)*(M+2)/2) SQRT((N**2-L**2)/(4*N**2-1))
+C     EPSTOP   - REAL (M+1) SQRT((N**2-L**2)/(4*N**2-1)) OVER TOP
+C
+C   OUTPUT ARGUMENT LIST:
+C     PLN      - REAL ((M+1)*(M+2)/2) LEGENDRE POLYNOMIAL
+C     PLNTOP   - REAL (M+1) LEGENDRE POLYNOMIAL OVER TOP
+C
+C ATTRIBUTES:
+C   LANGUAGE: CRAY FORTRAN
+C
+C$$$
+CFPP$ NOCONCUR R
+      REAL EPS((M+1)*(M+2)/2),EPSTOP(M+1)
+      REAL PLN((M+1)*(M+2)/2),PLNTOP(M+1)
+C - - - - - - - - - - - - - - - - - - - - - - - - - - - - - - - - - - -
+C  ITERATIVELY COMPUTE PLN(L,L) (BOTTOM HYPOTENUSE OF TRIANGLE)
+      NML=0
+      I=1
+      PLN(I)=SQRT(0.5)
+      DO L=1,M-NML
+        PLNI=PLN(I)
+        I=L*(2*M+3-L)/2+(NML+1)
+        PLN(I)=PLNI*CLAT*SQRT(FLOAT(2*L+1)/FLOAT(2*L))
+      ENDDO
+C - - - - - - - - - - - - - - - - - - - - - - - - - - - - - - - - - - -
+C  COMPUTE PLN(L,L+1) (DIAGONAL NEXT TO BOTTOM HYPOTENUSE OF TRIANGLE)
+      NML=1
+      DO L=0,M-NML
+        I=L*(2*M+3-L)/2+(NML+1)
+        PLN(I)=SLAT*PLN(I-1)/EPS(I)
+      ENDDO
+C - - - - - - - - - - - - - - - - - - - - - - - - - - - - - - - - - - -
+C  COMPUTE REMAINING PLN IN SPECTRAL TRIANGLE
+      DO NML=2,M
+        DO L=0,M-NML
+          I=L*(2*M+3-L)/2+(NML+1)
+          PLN(I)=(SLAT*PLN(I-1)-EPS(I-1)*PLN(I-2))/EPS(I)
+        ENDDO
+      ENDDO
+C - - - - - - - - - - - - - - - - - - - - - - - - - - - - - - - - - - -
+C  COMPUTE POLYNOMIALS OVER TOP OF SPECTRAL TRIANGLE
+      DO L=0,M
+        NML=M+1-L
+        I=L*(2*M+3-L)/2+(NML+1)
+        PLNTOP(L+1)=(SLAT*PLN(I-1)-EPS(I-1)*PLN(I-2))/EPSTOP(L+1)
+      ENDDO
+C - - - - - - - - - - - - - - - - - - - - - - - - - - - - - - - - - - -
+      RETURN
+      END
+C-----------------------------------------------------------------------
+      SUBROUTINE PSYNTH(M,IM,NC,NCTOP,KM,PLN,PLNTOP,SPC,SPCTOP,F)
+C$$$  SUBPROGRAM DOCUMENTATION BLOCK
+C
+C SUBPROGRAM:    PSYNTH      SYNTHESIZE FOURIER FROM SPECTRAL
+C   PRGMMR: IREDELL          ORG: W/NMC23     DATE: 92-10-31
+C
+C ABSTRACT: SYNTHESIZES FOURIER COEFFICIENTS FROM SPECTRAL COEFFICIENTS
+C           FOR A LATITUDE PAIR (NORTHERN AND SOUTHERN HEMISPHERES).
+C
+C PROGRAM HISTORY LOG:
+C   91-10-31  MARK IREDELL
+C
+C USAGE:    CALL PSYNTH(M,IM,NC,NCTOP,KM,PLN,PLNTOP,SPC,SPCTOP,F)
+C
+C   INPUT ARGUMENT LIST:
+C     M        - INTEGER SPECTRAL TRUNCATION
+C     IM       - INTEGER DIMENSION OF FOURIER COEFFICIENTS (IM>=2*(M+1))
+C     NC       - INTEGER DIMENSION OF SPECTRAL COEFFICIENTS
+C                (NC>=(M+1)*(M+2))
+C     NCTOP    - INTEGER DIMENSION OF SPECTRAL COEFFICIENTS OVER TOP
+C                (NCTOP>=2*(M+1))
+C     KM       - INTEGER NUMBER OF FIELDS
+C     PLN      - REAL ((M+1)*(M+2)/2) LEGENDRE POLYNOMIAL
+C     PLNTOP   - REAL (M+1) LEGENDRE POLYNOMIAL OVER TOP
+C     SPC      - REAL (NC,KM) SPECTRAL COEFFICIENTS
+C     SPCTOP   - REAL (NCTOP,KM) SPECTRAL COEFFICIENTS OVER TOP
+C
+C   OUTPUT ARGUMENT LIST:
+C     F        - REAL (IM,2,KM) FOURIER COEFFICIENTS FOR LATITUDE PAIR
+C
+C SUBPROGRAMS CALLED:
+C   SGEMVX1      CRAY LIBRARY MATRIX TIMES VECTOR
+C
+C ATTRIBUTES:
+C   LANGUAGE: CRAY FORTRAN
+C
+C$$$
+CFPP$ NOCONCUR R
+      REAL PLN((M+1)*(M+2)/2),PLNTOP(M+1)
+      REAL SPC(NC,KM),SPCTOP(NCTOP,KM)
+      REAL F(IM,2,KM)
+C - - - - - - - - - - - - - - - - - - - - - - - - - - - - - - - - - - -
+C  INITIALIZE FOURIER COEFFICIENTS WITH TERMS OVER TOP OF THE SPECTRUM.
+C  INITIALIZE EVEN AND ODD POLYNOMIALS SEPARATELY.
+      LTOPE=MOD(M+1,2)
+      LTOPO=1-LTOPE
+      DO K=1,KM
+        DO L=LTOPE,M,2
+          F(2*L+1,1,K)=PLNTOP(L+1)*SPCTOP(2*L+1,K)
+          F(2*L+2,1,K)=PLNTOP(L+1)*SPCTOP(2*L+2,K)
+          F(2*L+1,2,K)=0.
+          F(2*L+2,2,K)=0.
+        ENDDO
+        DO L=LTOPO,M,2
+          F(2*L+1,1,K)=0.
+          F(2*L+2,1,K)=0.
+          F(2*L+1,2,K)=PLNTOP(L+1)*SPCTOP(2*L+1,K)
+          F(2*L+2,2,K)=PLNTOP(L+1)*SPCTOP(2*L+2,K)
+        ENDDO
+      ENDDO
+C - - - - - - - - - - - - - - - - - - - - - - - - - - - - - - - - - - -
+C  FOR EACH ZONAL WAVENUMBER, SYNTHESIZE TERMS OVER TOTAL WAVENUMBER.
+C  SYNTHESIZE EVEN AND ODD POLYNOMIALS SEPARATELY.
+C  COMMENTED CODE REPLACED BY LIBRARY CALLS.
+      DO L=0,M
+        IS=L*(2*M+1-L)
+        IP=IS/2+1
+        DO N=L,M,2
+          DO K=1,KM
+            F(2*L+1,1,K)=F(2*L+1,1,K)+PLN(IP+N)*SPC(IS+2*N+1,K)
+            F(2*L+2,1,K)=F(2*L+2,1,K)+PLN(IP+N)*SPC(IS+2*N+2,K)
+          ENDDO
+        ENDDO
+c       CALL SGEMVX1(KM,(M+2-L)/2,1.,SPC(IS+2*L+1,1),NC,4,PLN(IP+L),2,
+c    &               1.,F(2*L+1,1,1),IM*2)
+c       CALL SGEMVX1(KM,(M+2-L)/2,1.,SPC(IS+2*L+2,1),NC,4,PLN(IP+L),2,
+c    &               1.,F(2*L+2,1,1),IM*2)
+        DO N=L+1,M,2
+          DO K=1,KM
+            F(2*L+1,2,K)=F(2*L+1,2,K)+PLN(IP+N)*SPC(IS+2*N+1,K)
+            F(2*L+2,2,K)=F(2*L+2,2,K)+PLN(IP+N)*SPC(IS+2*N+2,K)
+          ENDDO
+        ENDDO
+c       CALL SGEMVX1(KM,(M+1-L)/2,1.,SPC(IS+2*L+3,1),NC,4,PLN(IP+L+1),2,
+c    &               1.,F(2*L+1,2,1),IM*2)
+c       CALL SGEMVX1(KM,(M+1-L)/2,1.,SPC(IS+2*L+4,1),NC,4,PLN(IP+L+1),2,
+c    &               1.,F(2*L+2,2,1),IM*2)
+      ENDDO
+C - - - - - - - - - - - - - - - - - - - - - - - - - - - - - - - - - - -
+C  SEPARATE FOURIER COEFFICIENTS FROM EACH HEMISPHERE.
+C  ODD POLYNOMIALS CONTRIBUTE NEGATIVELY TO THE SOUTHERN HEMISPHERE.
+      DO K=1,KM
+        DO L=0,M
+          F1R=F(2*L+1,1,K)
+          F1I=F(2*L+2,1,K)
+          F(2*L+1,1,K)=F1R+F(2*L+1,2,K)
+          F(2*L+2,1,K)=F1I+F(2*L+2,2,K)
+          F(2*L+1,2,K)=F1R-F(2*L+1,2,K)
+          F(2*L+2,2,K)=F1I-F(2*L+2,2,K)
+        ENDDO
+      ENDDO
+C - - - - - - - - - - - - - - - - - - - - - - - - - - - - - - - - - - -
+C  ZERO OUT FOURIER WAVES OUTSIDE OF SPECTRUM
+      DO L2=2*M+3,IM
+        DO K=1,KM
+          F(L2,1,K)=0.
+          F(L2,2,K)=0.
+        ENDDO
+      ENDDO
+C - - - - - - - - - - - - - - - - - - - - - - - - - - - - - - - - - - -
+      RETURN
+      END
+C-----------------------------------------------------------------------
+      SUBROUTINE PLEGP(M,EPS,EPSTOP,PLN,PLNTOP)
+C$$$  SUBPROGRAM DOCUMENTATION BLOCK
+C
+C SUBPROGRAM:    PLEGP       COMPUTE LEGENDRE POLYNOMIALS AT THE POLE
+C   PRGMMR: IREDELL          ORG: W/NMC23     DATE: 92-10-31
+C
+C ABSTRACT: EVALUATES THE ORTHONORMAL ASSOCIATED LEGENDRE POLYNOMIALS
+C           IN THE SPECTRAL TRIANGLE AT THE POLE.
+C           SCALAR FIELDS ARE SYNTHESIZED WITH ZONAL WAVENUMBER 0 WHILE
+C           VECTOR FIELDS ARE SYNTHESIZED WITH ZONAL WAVENUMBER 1.
+C           SUBPROGRAM GSPC SHOULD BE CALLED ALREADY.
+C           IF L IS THE ZONAL WAVENUMBER, N IS THE TOTAL WAVENUMBER,
+C           AND EPS(L,N)=SQRT((N**2-L**2)/(4*N**2-1)) THEN
+C           THE FOLLOWING BOOTSTRAPPING FORMULAS ARE USED:
+C           PLN(0,0)=SQRT(0.5)
+C           PLN(1,1)=SQRT(0.75)
+C           PLN(L,N)=(PLN(L,N-1)-EPS(L,N-1)*PLN(L,N-2))/EPS(L,N)
+C
+C PROGRAM HISTORY LOG:
+C   91-10-31  MARK IREDELL
+C
+C USAGE:    CALL PLEGP(M,EPS,EPSTOP,PLN,PLNTOP)
+C
+C   INPUT ARGUMENT LIST:
+C     M        - INTEGER SPECTRAL TRUNCATION
+C     EPS      - REAL (2*M+1) SQRT((N**2-L**2)/(4*N**2-1))
+C     EPSTOP   - REAL (2) SQRT((N**2-L**2)/(4*N**2-1)) OVER TOP
+C
+C   OUTPUT ARGUMENT LIST:
+C     PLN      - REAL (2*M+1) LEGENDRE POLYNOMIAL
+C     PLNTOP   - REAL (2) LEGENDRE POLYNOMIAL OVER TOP
+C
+C ATTRIBUTES:
+C   LANGUAGE: CRAY FORTRAN
+C
+C$$$
+CFPP$ NOCONCUR R
+      REAL EPS(2*M+1),EPSTOP(2)
+      REAL PLN(2*M+1),PLNTOP(2)
+C - - - - - - - - - - - - - - - - - - - - - - - - - - - - - - - - - - -
+C  ITERATIVELY COMPUTE PLN WITHIN SPECTRAL TRIANGLE
+      PLN(1)=SQRT(0.5)
+      PLN(M+2)=SQRT(0.75)
+      PLN(2)=PLN(1)/EPS(2)
+      PLN(M+3)=PLN(M+2)/EPS(M+3)
+      PLN(3)=(PLN(2)-EPS(2)*PLN(1))/EPS(3)
+      DO N=3,M
+        I=N+1
+        PLN(I)=(PLN(I-1)-EPS(I-1)*PLN(I-2))/EPS(I)
+        I=N+M+1
+        PLN(I)=(PLN(I-1)-EPS(I-1)*PLN(I-2))/EPS(I)
+      ENDDO
+C - - - - - - - - - - - - - - - - - - - - - - - - - - - - - - - - - - -
+C  COMPUTE POLYNOMIALS OVER TOP OF SPECTRAL TRIANGLE
+      I=M+2
+      PLNTOP(1)=(PLN(I-1)-EPS(I-1)*PLN(I-2))/EPSTOP(1)
+      I=2*M+2
+      PLNTOP(2)=(PLN(I-1)-EPS(I-1)*PLN(I-2))/EPSTOP(2)
+C - - - - - - - - - - - - - - - - - - - - - - - - - - - - - - - - - - -
+      RETURN
+      END
+C-----------------------------------------------------------------------
+      SUBROUTINE PSYNTHP(M,IM,NC,NCTOP,KM,PLN,PLNTOP,MP,SPC,SPCTOP,F)
+C$$$  SUBPROGRAM DOCUMENTATION BLOCK
+C
+C SUBPROGRAM:    PSYNTHP     SYNTHESIZE FOURIER FROM SPECTRAL AT THE POL
+C   PRGMMR: IREDELL          ORG: W/NMC23     DATE: 92-10-31
+C
+C ABSTRACT: SYNTHESIZES FOURIER COEFFICIENTS FROM SPECTRAL COEFFICIENTS
+C           FOR A LATITUDE PAIR (NORTHERN AND SOUTHERN HEMISPHERES)
+C           AT THE POLE.
+C
+C PROGRAM HISTORY LOG:
+C   91-10-31  MARK IREDELL
+C
+C USAGE:    CALL PSYNTHP(M,IM,NC,NCTOP,KM,PLN,PLNTOP,MP,SPC,SPCTOP,F)
+C
+C   INPUT ARGUMENT LIST:
+C     M        - INTEGER SPECTRAL TRUNCATION
+C     IM       - INTEGER DIMENSION OF FOURIER COEFFICIENTS (IM>=2*(M+1))
+C     NC       - INTEGER DIMENSION OF SPECTRAL COEFFICIENTS
+C                (NC>=(M+1)*(M+2))
+C     NCTOP    - INTEGER DIMENSION OF SPECTRAL COEFFICIENTS OVER TOP
+C                (NCTOP>=2*(M+1))
+C     KM       - INTEGER NUMBER OF FIELDS
+C     PLN      - REAL (2*M+1) LEGENDRE POLYNOMIAL
+C     PLNTOP   - REAL (2) LEGENDRE POLYNOMIAL OVER TOP
+C     MP       - INTEGER (KM) IDENTIFIERS (0 FOR SCALAR, 1 FOR VECTOR)
+C     SPC      - REAL (NC,KM) SPECTRAL COEFFICIENTS
+C     SPCTOP   - REAL (NCTOP,KM) SPECTRAL COEFFICIENTS OVER TOP
+C
+C   OUTPUT ARGUMENT LIST:
+C     F        - REAL (IM,2,KM) FOURIER COEFFICIENTS FOR LATITUDE PAIR
+C
+C SUBPROGRAMS CALLED:
+C   SGEMVX1      CRAY LIBRARY MATRIX TIMES VECTOR
+C
+C ATTRIBUTES:
+C   LANGUAGE: CRAY FORTRAN
+C
+C$$$
+CFPP$ NOCONCUR R
+      REAL PLN(2*M+1),PLNTOP(2)
+      INTEGER MP(KM)
+      REAL SPC(NC,KM),SPCTOP(NCTOP,KM)
+      REAL F(IM,2,KM)
+C - - - - - - - - - - - - - - - - - - - - - - - - - - - - - - - - - - -
+C  ZERO OUT FOURIER WAVES
+      DO K=1,KM
+        DO L2=1,IM
+          F(L2,1,K)=0.
+          F(L2,2,K)=0.
+        ENDDO
+      ENDDO
+C - - - - - - - - - - - - - - - - - - - - - - - - - - - - - - - - - - -
+C  INITIALIZE FOURIER COEFFICIENTS WITH TERMS OVER TOP OF THE SPECTRUM.
+C  INITIALIZE EVEN AND ODD POLYNOMIALS SEPARATELY.
+      LTOPE=MOD(M+1,2)
+      DO K=1,KM
+        L=MP(K)
+        IF(L.EQ.LTOPE) THEN
+          F(2*L+1,1,K)=PLNTOP(L+1)*SPCTOP(2*L+1,K)
+          F(2*L+2,1,K)=PLNTOP(L+1)*SPCTOP(2*L+2,K)
+          F(2*L+1,2,K)=0.
+          F(2*L+2,2,K)=0.
+        ELSE
+          F(2*L+1,1,K)=0.
+          F(2*L+2,1,K)=0.
+          F(2*L+1,2,K)=PLNTOP(L+1)*SPCTOP(2*L+1,K)
+          F(2*L+2,2,K)=PLNTOP(L+1)*SPCTOP(2*L+2,K)
+        ENDIF
+      ENDDO
+C - - - - - - - - - - - - - - - - - - - - - - - - - - - - - - - - - - -
+C  FOR EACH ZONAL WAVENUMBER, SYNTHESIZE TERMS OVER TOTAL WAVENUMBER.
+C  SYNTHESIZE EVEN AND ODD POLYNOMIALS SEPARATELY.
+      DO K=1,KM
+        L=MP(K)
+        IS=L*(2*M+1-L)
+        IP=IS/2+1
+        DO N=L,M,2
+          F(2*L+1,1,K)=F(2*L+1,1,K)+PLN(IP+N)*SPC(IS+2*N+1,K)
+          F(2*L+2,1,K)=F(2*L+2,1,K)+PLN(IP+N)*SPC(IS+2*N+2,K)
+        ENDDO
+        DO N=L+1,M,2
+          F(2*L+1,2,K)=F(2*L+1,2,K)+PLN(IP+N)*SPC(IS+2*N+1,K)
+          F(2*L+2,2,K)=F(2*L+2,2,K)+PLN(IP+N)*SPC(IS+2*N+2,K)
+        ENDDO
+      ENDDO
+C - - - - - - - - - - - - - - - - - - - - - - - - - - - - - - - - - - -
+C  SEPARATE FOURIER COEFFICIENTS FROM EACH HEMISPHERE.
+C  ODD POLYNOMIALS CONTRIBUTE NEGATIVELY TO THE SOUTHERN HEMISPHERE.
+      DO K=1,KM
+        L=MP(K)
+        F1R=F(2*L+1,1,K)
+        F1I=F(2*L+2,1,K)
+        F(2*L+1,1,K)=F1R+F(2*L+1,2,K)
+        F(2*L+2,1,K)=F1I+F(2*L+2,2,K)
+        F(2*L+1,2,K)=F1R-F(2*L+1,2,K)
+        F(2*L+2,2,K)=F1I-F(2*L+2,2,K)
+      ENDDO
+C - - - - - - - - - - - - - - - - - - - - - - - - - - - - - - - - - - -
+      RETURN
+      END
+C-----------------------------------------------------------------------
+      SUBROUTINE UV2DZ(M,ENN1,ELONN1,EON,EONTOP,U,V,UTOP,VTOP,D,Z)
+C$$$  SUBPROGRAM DOCUMENTATION BLOCK
+C
+C SUBPROGRAM:    UV2DZ       COMPUTE DIVERGENCE AND VORTICITY FROM WINDS
+C   PRGMMR: IREDELL          ORG: W/NMC23     DATE: 92-10-31
+C
+C ABSTRACT: COMPUTES THE DIVERGENCE AND VORTICITY FROM WIND COMPONENTS
+C           IN SPECTRAL SPACE. SUBPROGRAM GSPC SHOULD BE CALLED ALREADY.
+C           IF L IS THE ZONAL WAVENUMBER, N IS THE TOTAL WAVENUMBER,
+C           EPS(L,N)=SQRT((N**2-L**2)/(4*N**2-1)) AND A IS EARTH RADIUS,
+C           THEN THE DIVERGENCE D IS COMPUTED AS
+C             D(L,N)=I*L*A*U(L,N)
+C                    +EPS(L,N+1)*N*A*V(L,N+1)-EPS(L,N)*(N+1)*A*V(L,N-1)
+C           AND THE VORTICITY Z IS COMPUTED AS
+C             Z(L,N)=I*L*A*V(L,N)
+C                    -EPS(L,N+1)*N*A*U(L,N+1)+EPS(L,N)*(N+1)*A*U(L,N-1)
+C
+C           WHERE U IS THE ZONAL WIND AND V IS THE MERIDIONAL WIND.
+C           EXTRA TERMS ARE USED OVER TOP OF THE SPECTRAL TRIANGLE.
+C           ADVANTAGE IS TAKEN OF THE FACT THAT EPS(L,L)=0
+C           IN ORDER TO VECTORIZE OVER THE ENTIRE SPECTRAL TRIANGLE.
+C
+C PROGRAM HISTORY LOG:
+C   91-10-31  MARK IREDELL
+C
+C USAGE:    CALL UV2DZ(M,ENN1,ELONN1,EON,EONTOP,U,V,UTOP,VTOP,D,Z)
+C
+C   INPUT ARGUMENT LIST:
+C     M        - INTEGER SPECTRAL TRUNCATION
+C     ENN1     - REAL ((M+1)*(M+2)/2) N*(N+1)/A**2
+C     ELONN1   - REAL ((M+1)*(M+2)/2) L/(N*(N+1))*A
+C     EON      - REAL ((M+1)*(M+2)/2) EPSILON/N*A
+C     EONTOP   - REAL (M+1) EPSILON/N*A OVER TOP
+C     U        - REAL ((M+1)*(M+2)) ZONAL WIND (TIMES COSLAT)
+C     V        - REAL ((M+1)*(M+2)) MERID WIND (TIMES COSLAT)
+C     UTOP     - REAL (2*(M+1)) ZONAL WIND (TIMES COSLAT) OVER TOP
+C     VTOP     - REAL (2*(M+1)) MERID WIND (TIMES COSLAT) OVER TOP
+C
+C   OUTPUT ARGUMENT LIST:
+C     D        - REAL ((M+1)*(M+2)) DIVERGENCE
+C     Z        - REAL ((M+1)*(M+2)) VORTICITY
+C
+C ATTRIBUTES:
+C   LANGUAGE: CRAY FORTRAN
+C
+C$$$
+      REAL ENN1((M+1)*(M+2)/2),ELONN1((M+1)*(M+2)/2)
+      REAL EON((M+1)*(M+2)/2),EONTOP(M+1)
+      REAL U((M+1)*(M+2)),V((M+1)*(M+2)),UTOP(2*(M+1)),VTOP(2*(M+1))
+      REAL D((M+1)*(M+2)),Z((M+1)*(M+2))
+C - - - - - - - - - - - - - - - - - - - - - - - - - - - - - - - - - - -
+C  COMPUTE TERMS FROM THE SPECTRAL TRIANGLE
+      I=1
+      D(2*I-1)=0.
+      D(2*I)=0.
+      Z(2*I-1)=0.
+      Z(2*I)=0.
+      DO I=2,(M+1)*(M+2)/2-1
+        D(2*I-1)=-ELONN1(I)*U(2*I)+EON(I+1)*V(2*I+1)-EON(I)*V(2*I-3)
+        D(2*I)=ELONN1(I)*U(2*I-1)+EON(I+1)*V(2*I+2)-EON(I)*V(2*I-2)
+        Z(2*I-1)=-ELONN1(I)*V(2*I)-EON(I+1)*U(2*I+1)+EON(I)*U(2*I-3)
+        Z(2*I)=ELONN1(I)*V(2*I-1)-EON(I+1)*U(2*I+2)+EON(I)*U(2*I-2)
+      ENDDO
+      I=(M+1)*(M+2)/2
+      D(2*I-1)=-ELONN1(I)*U(2*I)-EON(I)*V(2*I-3)
+      D(2*I)=ELONN1(I)*U(2*I-1)-EON(I)*V(2*I-2)
+      Z(2*I-1)=-ELONN1(I)*V(2*I)+EON(I)*U(2*I-3)
+      Z(2*I)=ELONN1(I)*V(2*I-1)+EON(I)*U(2*I-2)
+C - - - - - - - - - - - - - - - - - - - - - - - - - - - - - - - - - - -
+C  COMPUTE TERMS FROM OVER TOP OF THE SPECTRAL TRIANGLE
+      DO L=0,M
+        I=L*(2*M+1-L)/2+M+1
+        D(2*I-1)=D(2*I-1)+EONTOP(L+1)*VTOP(2*L+1)
+        D(2*I)=D(2*I)+EONTOP(L+1)*VTOP(2*L+2)
+        Z(2*I-1)=Z(2*I-1)-EONTOP(L+1)*UTOP(2*L+1)
+        Z(2*I)=Z(2*I)-EONTOP(L+1)*UTOP(2*L+2)
+      ENDDO
+C - - - - - - - - - - - - - - - - - - - - - - - - - - - - - - - - - - -
+C  MULTIPLY BY LAPLACIAN TERM
+      DO I=2,(M+1)*(M+2)/2
+        D(2*I-1)=D(2*I-1)*ENN1(I)
+        D(2*I)=D(2*I)*ENN1(I)
+        Z(2*I-1)=Z(2*I-1)*ENN1(I)
+        Z(2*I)=Z(2*I)*ENN1(I)
+      ENDDO
+C - - - - - - - - - - - - - - - - - - - - - - - - - - - - - - - - - - -
+      RETURN
+      END
+C-----------------------------------------------------------------------
+      SUBROUTINE FCOMB(M,IM,KM,F)
+C$$$  SUBPROGRAM DOCUMENTATION BLOCK
+C
+C SUBPROGRAM:    FCOMB       COMBINE PAIRED FOURIER COEFFICIENTS
+C   PRGMMR: IREDELL          ORG: W/NMC23     DATE: 92-10-31
+C
+C ABSTRACT: COMBINES PAIRED SETS OF FOURIER COEFFICIENTS
+C           FROM NORTHERN AND SOUTHERN HEMISPHERES, RESPECTIVELY,
+C           INTO EVEN AND ODD COMPONENTS FOR LEGENDRE ANALYSIS.
+C
+C PROGRAM HISTORY LOG:
+C   91-10-31  MARK IREDELL
+C
+C USAGE:    CALL FCOMB(M,IM,KM,F)
+C
+C   INPUT ARGUMENT LIST:
+C     M        - INTEGER SPECTRAL TRUNCATION
+C     IM       - INTEGER DIMENSION OF FOURIER COEFFICIENTS (IM>=2*M+2)
+C     KM       - INTEGER NUMBER OF FIELDS
+C     F        - REAL (IM,2,KM) FOURIER COEFFICIENTS FOR LATITUDE PAIR
+C
+C   OUTPUT ARGUMENT LIST:
+C     F        - REAL (IM,2,KM) FOURIER COEFFICIENTS COMBINED
+C
+C ATTRIBUTES:
+C   LANGUAGE: CRAY FORTRAN
+C
+C$$$
+CFPP$ NOCONCUR R
+      REAL F(IM,2,KM)
+C - - - - - - - - - - - - - - - - - - - - - - - - - - - - - - - - - - -
+C  COMBINE FOURIER COEFFICIENTS FROM EACH HEMISPHERE.
+C  ODD POLYNOMIALS CONTRIBUTE NEGATIVELY TO THE SOUTHERN HEMISPHERE.
+      DO K=1,KM
+        DO L=0,M
+          F1R=F(2*L+1,1,K)
+          F1I=F(2*L+2,1,K)
+          F(2*L+1,1,K)=F1R+F(2*L+1,2,K)
+          F(2*L+2,1,K)=F1I+F(2*L+2,2,K)
+          F(2*L+1,2,K)=F1R-F(2*L+1,2,K)
+          F(2*L+2,2,K)=F1I-F(2*L+2,2,K)
+        ENDDO
+      ENDDO
+C - - - - - - - - - - - - - - - - - - - - - - - - - - - - - - - - - - -
+      RETURN
+      END
+C-----------------------------------------------------------------------
+      SUBROUTINE PANALY(M,IM,NC,NCTOP,L,KM,WGT,PLN,PLNTOP,F,SPC,SPCTOP)
+C$$$  SUBPROGRAM DOCUMENTATION BLOCK
+C
+C SUBPROGRAM:    PANALY      ANALYZE SPECTRAL FROM FOURIER
+C   PRGMMR: IREDELL          ORG: W/NMC23     DATE: 92-10-31
+C
+C ABSTRACT: ANALYZES SPECTRAL COEFFICIENTS FROM FOURIER COEFFICIENTS
+C           FOR A PARTICULAR ZONAL WAVENUMBER AND
+C           FOR A LATITUDE PAIR (NORTHERN AND SOUTHERN HEMISPHERES).
+C
+C PROGRAM HISTORY LOG:
+C   91-10-31  MARK IREDELL
+C
+C USAGE:    CALL PANALY(M,IM,NC,NCTOP,L,KM,WGT,PLN,PLNTOP,F,SPC,SPCTOP)
+C
+C   INPUT ARGUMENT LIST:
+C     M        - INTEGER SPECTRAL TRUNCATION
+C     IM       - INTEGER DIMENSION OF FOURIER COEFFICIENTS (IM>=2*M+2)
+C     NC       - INTEGER DIMENSION OF SPECTRAL COEFFICIENTS
+C                (NC>=(M+1)*(M+2))
+C     NCTOP    - INTEGER DIMENSION OF SPECTRAL COEFFICIENTS OVER TOP
+C                (NCTOP>=2*(M+1))
+C     L        - ZONAL WAVENUMBER TO ANALYZE (0<=L<=M)
+C     KM       - INTEGER NUMBER OF FIELDS
+C     WGT      - REAL GAUSSIAN WEIGHT
+C     PLN      - REAL ((M+1)*(M+2)/2) LEGENDRE POLYNOMIALS
+C     PLNTOP   - REAL (M+1) LEGENDRE POLYNOMIAL OVER TOP
+C     F        - REAL (IM,2,KM) FOURIER COEFFICIENTS COMBINED
+C     SPC      - REAL (NC,KM) SPECTRAL COEFFICIENTS
+C     SPCTOP   - REAL (NCTOP,KM) SPECTRAL COEFFICIENTS OVER TOP
+C
+C   OUTPUT ARGUMENT LIST:
+C     SPC      - REAL (NC,KM) SPECTRAL COEFFICIENTS
+C     SPCTOP   - REAL (NCTOP,KM) SPECTRAL COEFFICIENTS OVER TOP
+C
+C SUBPROGRAMS CALLED:
+C   SGERX1       CRAY LIBRARY MATRIX RANK 1 UPDATE
+C
+C ATTRIBUTES:
+C   LANGUAGE: CRAY FORTRAN
+C
+C$$$
+CFPP$ NOCONCUR R
+      REAL PLN((M+1)*(M+2)/2),PLNTOP(M+1)
+      REAL F(IM,2,KM)
+      REAL SPC(NC,KM),SPCTOP(NCTOP,KM)
+C - - - - - - - - - - - - - - - - - - - - - - - - - - - - - - - - - - -
+C  FOR EACH ZONAL WAVENUMBER, ANALYZE TERMS OVER TOTAL WAVENUMBER.
+C  ANALYZE EVEN AND ODD POLYNOMIALS SEPARATELY.
+C  COMMENTED CODE REPLACED BY LIBRARY CALLS.
+      NT=MOD(M+1-L,2)+1
+      DO K=1,KM
+        SPCTOP(2*L+1,K)=SPCTOP(2*L+1,K)+WGT*PLNTOP(L+1)*F(2*L+1,NT,K)
+        SPCTOP(2*L+2,K)=SPCTOP(2*L+2,K)+WGT*PLNTOP(L+1)*F(2*L+2,NT,K)
+      ENDDO
+      IS=L*(2*M+1-L)
+      IP=IS/2+1
+      DO N=L,M,2
+        DO K=1,KM
+          SPC(IS+2*N+1,K)=SPC(IS+2*N+1,K)+WGT*PLN(IP+N)*F(2*L+1,1,K)
+          SPC(IS+2*N+2,K)=SPC(IS+2*N+2,K)+WGT*PLN(IP+N)*F(2*L+2,1,K)
+        ENDDO
+      ENDDO
+c     CALL SGERX1((M+2-L)/2,KM,WGT,PLN(IP+L),2,F(2*L+1,1,1),IM*2,
+c    &            SPC(IS+2*L+1,1),4,NC)
+c     CALL SGERX1((M+2-L)/2,KM,WGT,PLN(IP+L),2,F(2*L+2,1,1),IM*2,
+c    &            SPC(IS+2*L+2,1),4,NC)
+      DO N=L+1,M,2
+        DO K=1,KM
+          SPC(IS+2*N+1,K)=SPC(IS+2*N+1,K)+WGT*PLN(IP+N)*F(2*L+1,2,K)
+          SPC(IS+2*N+2,K)=SPC(IS+2*N+2,K)+WGT*PLN(IP+N)*F(2*L+2,2,K)
+        ENDDO
+      ENDDO
+c     CALL SGERX1((M+1-L)/2,KM,WGT,PLN(IP+L+1),2,F(2*L+1,2,1),IM*2,
+c    &            SPC(IS+2*L+3,1),4,NC)
+c     CALL SGERX1((M+1-L)/2,KM,WGT,PLN(IP+L+1),2,F(2*L+2,2,1),IM*2,
+c    &            SPC(IS+2*L+4,1),4,NC)
+C - - - - - - - - - - - - - - - - - - - - - - - - - - - - - - - - - - -
+      RETURN
+      END
+C-----------------------------------------------------------------------
+      SUBROUTINE GPVS
+C$$$     SUBPROGRAM DOCUMENTATION BLOCK
+C
+C SUBPROGRAM: GPVS         COMPUTE SATURATION VAPOR PRESSURE TABLE
+C   AUTHOR: N PHILLIPS            W/NMC2X2   DATE: 30 DEC 82
+C
+C ABSTRACT: COMPUTE SATURATION VAPOR PRESSURE TABLE AS A FUNCTION OF
+C   TEMPERATURE FOR FUNCTION FPVS. THE WATER MODEL ASSUMES A PERFECT GAS
+C   CONSTANT SPECIFIC HEATS FOR GAS AND LIQUID, AND NEGLECTS
+C   THE VOLUME OF THE LIQUID. THE ICE OPTION IS NO LONGER INCLUDED.
+C   THE MODEL DOES ACCOUNT FOR THE VARIATION OF THE LATENT HEAT
+C   OF CONDENSATION WITH TEMPERATURE. THE CLAUSIUS-CLAPEYRON EQUATION
+C   IS INTEGRATED FROM THE TRIPLE POINT TO GET THE FORMULA
+C       PVS=PSATK*(TR**XA)*EXP(XB*(1.-TR))
+C   WHERE TR IS TTP/T AND OTHER VALUES ARE PHYSICAL CONSTANTS
+C   DEFINED IN PARAMETER STATEMENTS IN THE CODE.
+C   THE CURRENT IMPLEMENTATION COMPUTES A TABLE WITH A LENGTH
+C   OF 1501 FOR TEMPERATURES RANGING FROM 180. TO 330. KELVIN.
+C
+C USAGE:  CALL GPVS
+C
+C PROGRAM HISTORY LOG:
+C   91-05-07  IREDELL
+C
+C COMMON BLOCKS:
+C   COMPVS   - SCALING PARAMETERS AND TABLE FOR FUNCTION FPVS.
+C
+C ATTRIBUTES:
+C   LANGUAGE: CRAY FORTRAN
+C
+C$$$
+      PARAMETER(CP= 1.0046E+3 ,RD= 2.8705E+2 ,RV= 4.6150E+2 ,
+     &          TTP= 2.7316E+2 ,HVAP= 2.5000E+6 ,PSATK= 6.1078E+2 *1.E-3
+     1,
+     &          CLIQ= 4.1855E+3 ,CVAP= 1.8460E+3 )
+      PARAMETER(DLDT=CVAP-CLIQ,XA=-DLDT/RV,XB=XA+HVAP/(RV*TTP))
+      PARAMETER(NX=1501)
+      DIMENSION TBPVS(NX)
+      COMMON/COMPVS/ C1XPVS,C2XPVS,ANXPVS,TBPVS
+C - - - - - - - - - - - - - - - - - - - - - - - - - - - - - - - - - - -
+      XMIN=180.0
+      XMAX=330.0
+      XINC=(XMAX-XMIN)/(NX-1)
+      C1XPVS=1.-XMIN/XINC
+      C2XPVS=1./XINC
+      ANXPVS=NX-0.01
+      DO JX=1,NX
+        X=XMIN+(JX-1)*XINC
+        T=X
+        TR=TTP/T
+        TBPVS(JX)=PSATK*(TR**XA)*EXP(XB*(1.-TR))
+      ENDDO
+C - - - - - - - - - - - - - - - - - - - - - - - - - - - - - - - - - - -
+      RETURN
+      END
+C-----------------------------------------------------------------------
+      FUNCTION FPVS(T)
+C$$$     SUBPROGRAM DOCUMENTATION BLOCK
+C
+C SUBPROGRAM: FPVS         COMPUTE SATURATION VAPOR PRESSURE
+C   AUTHOR: N PHILLIPS            W/NMC2X2   DATE: 30 DEC 82
+C
+C ABSTRACT: COMPUTE SATURATION VAPOR PRESSURE FROM THE TEMPERATURE.
+C   A LINEAR INTERPOLATION IS DONE BETWEEN VALUES IN A LOOKUP TABLE
+C   COMPUTED IN GPVS. SEE DOCUMENTATION FOR GPVS FOR DETAILS.
+C   INPUT VALUES OUTSIDE TABLE RANGE ARE RESET TO TABLE EXTREMA.
+C   THIS FUNCTION CAN BE EXPANDED INLINE IN CALLING ROUTINE.
+C
+C USAGE:   PVS=FPVS(T)
+C
+C PROGRAM HISTORY LOG:
+C   91-05-07  IREDELL             MADE INTO INLINABLE FUNCTION
+C
+C   INPUT ARGUMENT LIST:
+C     T        - REAL TEMPERATURE IN KELVIN
+C
+C   OUTPUT ARGUMENT LIST:
+C     FPVS     - REAL SATURATION VAPOR PRESSURE IN KILOPASCALS (CB)
+C
+C COMMON BLOCKS:
+C   COMPVS   - SCALING PARAMETERS AND TABLE COMPUTED IN GPVS.
+C
+C ATTRIBUTES:
+C   LANGUAGE: CRAY FORTRAN
+C
+C$$$
+      PARAMETER(NX=1501)
+      DIMENSION TBPVS(NX)
+      COMMON/COMPVS/ C1XPVS,C2XPVS,ANXPVS,TBPVS
+C - - - - - - - - - - - - - - - - - - - - - - - - - - - - - - - - - - -
+      XJ=MIN(MAX(C1XPVS+C2XPVS*T,1.),ANXPVS)
+      JX=XJ
+      FPVS=TBPVS(JX)+(XJ-JX)*(TBPVS(JX+1)-TBPVS(JX))
+C - - - - - - - - - - - - - - - - - - - - - - - - - - - - - - - - - - -
+      RETURN
+      END
+C-----------------------------------------------------------------------
+      FUNCTION FPKAP(P)
+C$$$   SUBPROGRAM  DOCUMENTATION  BLOCK
+C
+C SUBPROGRAM: FPKAP        RAISE SURFACE PRESSURE TO THE KAPPA POWER.
+C   AUTHOR: PHILLIPS         ORG: W/NMC2X2   DATE: 29 DEC 82
+C
+C ABSTRACT: RAISE SURFACE PRESSURE OVER 100 KPA TO THE KAPPA POWER
+C   USING THE RATIO OF TWO POLYNOMIALS IN PRESSURE. THE POLYNOMIAL
+C   COEFFICIENTS WERE OBTAINED FROM THE IMSL PROGRAM IRATCU
+C   WITH INPUT P/100 RANGE OF 0.5-1.1 AND KAPPA EQUAL TO 0.2856219.
+C   THE ACCURACY IS ABOUT THE SAME AS 32-BIT ARITHMETIC.
+C   THIS FUNCTION CAN BE EXPANDED INLINE IN CALLING ROUTINE.
+C
+C USAGE:  PKAP=FPKAP(P)
+C
+C   INPUT ARGUMENT LIST:
+C     P        - REAL SURFACE PRESSURE IN KILOPASCALS (CB)
+C                P SHOULD BE IN THE RANGE 50. TO 110.
+C
+C   OUTPUT ARGUMENT LIST:
+C     FPKAP    - REAL P/100 TO THE KAPPA POWER
+C
+C ATTRIBUTES:
+C   LANGUAGE: FORTRAN 77.
+C   MACHINE:  CRAY.
+C
+C$$$
+      PARAMETER(CN0=3.47575490E-1,CN1=4.36732956E-2,CN2= 3.91557032E-4,
+     &   CD0=1.,CD1=5.44053037E-2,CD2=2.27693825E-4,CD3=-8.69930591E-8)
+C - - - - - - - - - - - - - - - - - - - - - - - - - - - - - - - - - - -
+      FPKAP=(CN0+P*(CN1+P*CN2))/(CD0+P*(CD1+P*(CD2+P*CD3)))
+C - - - - - - - - - - - - - - - - - - - - - - - - - - - - - - - - - - -
+      RETURN
+      END
+	subroutine ifill(ia,n,ival)
+	integer ia(n)
+	do i = 1, n
+	    ia(i) = ival
+	enddo
+	return
+	end
+CFPP$ NOCONCUR R
+      SUBROUTINE ROWSEPL(IM,JM,A)
+C$$$  SUBPROGRAM DOCUMENTATION BLOCK
+C                .      .    .                                       .
+C SUBPROGRAM:    ROWSEP      SEPARATE NORTHERN AND SOUTHERN LATITUDES.
+C   PRGMMR: IREDELL          ORG: W/NMC23    DATE: 92-10-31
+C
+C ABSTRACT: SEPARATE NORTHERN AND SOUTHERN LATITUDES OF GRID.
+C   INLINE FUNCTION JLOC RETURNS INPUT LATITUDE GIVEN OUTPUT LATITUDE.
+C   LATITUDE ROWS ARE SWAPPED IN THE ARRAY UNTIL ALL ARE DONE.
+C
+C PROGRAM HISTORY LOG:
+C   88-04-12  JOSEPH SELA
+C   92-10-31  IREDELL
+C
+C USAGE:    CALL ROWSEP(IM,JM,A)
+C   INPUT ARGUMENT LIST:
+C     IM       - INTEGER NUMBER OF LONGITUDES IN GRID
+C     JM       - INTEGER NUMBER OF LATITUDES IN GRID
+C     A        - logical (IM,JM) GRID DATA
+C                WITH PAIRED NORTHERN AND SOUTHERN LATITUDES.
+C                INPUT ARRAY IS OVERWRITTEN BY OUTPUT ARRAY.
+C
+C   OUTPUT ARGUMENT LIST:
+C     A        - logical (IM,JM) GRID DATA
+C                WITH SEPARATED NORTHERN AND SOUTHERN LATITUDES.
+C
+C SUBPROGRAMS CALLED:
+C   ISRCHEQ  - FIND FIRST VALUE IN AN ARRAY EQUAL TO TARGET VALUE
+C
+C REMARKS:
+C   FORTRAN 77 EXTENSIONS ARE USED
+C   SUCH AS AUTOMATIC ARRAYS, ARRAY SECTIONS AND DOWHILE STATEMENTS
+C
+C ATTRIBUTES:
+C   LANGUAGE: CRAY FORTRAN
+C
+C$$$
+      DIMENSION A(IM,JM)
+      DIMENSION B(IM),JDONE(JM)
+      JLOC(JA)=MIN(2*JA-1,2*(JM+1-JA))
+C - - - - - - - - - - - - - - - - - - - - - - - - - - - - - - - - - - -
+c     JDONE=0
+	call ifill(jdone,jm,0)
+      JSAVE=1
+      DOWHILE(JSAVE.LE.JM)
+c       B(:)=A(:,JSAVE)
+	do i = 1, im
+	    b(i) = a(i,jsave)
+	enddo
+        JPUT=JSAVE
+        JGET=JLOC(JPUT)
+        DOWHILE(JGET.NE.JSAVE)
+c         A(:,JPUT)=A(:,JGET)
+	  do i = 1, im
+	     a(i,jput) = a(i,jget)
+	  enddo
+          JDONE(JPUT)=1
+          JPUT=JGET
+          JGET=JLOC(JPUT)
+        ENDDO
+c       A(:,JPUT)=B(:)
+	do i = 1, im
+	    a(i,jput) = b(i)
+	enddo
+        JDONE(JPUT)=1
+        JSAVE=JSAVE+ISRCHEQ(JM-JSAVE,JDONE(JSAVE+1),1,0)
+      ENDDO
+C - - - - - - - - - - - - - - - - - - - - - - - - - - - - - - - - - - -
+      RETURN
+      END

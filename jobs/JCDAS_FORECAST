@@ -1,0 +1,196 @@
+#!/bin/sh
+#
+# run assimilation and fcst for NCEP/NCAR Reanalysis .. old CDAS
+#
+set -x
+
+model=${model:-cdas}
+
+# #### 06/19/2000 #######################################
+# SETUP CDAS ANALYSIS/FORECAST/POST PROCESSING VARIABLES
+# #######################################################
+date
+export PS4='$SECONDS + '
+
+####################################
+# obtain unique process id (pid) and make temp directory
+####################################
+export pid=$$
+export DATA=${DATA:-$DATAROOT/${jobid}}
+mkdir -p $DATA
+cd $DATA
+
+export cycle=t${cyc?"'cyc' not defined"}z
+export tmmark=tm00
+####################################
+# Specify NET and RUN Name and model
+####################################
+export NET=${NET:-cdas}
+export RUN=${RUN:-cdas}
+
+####################################
+# Determine Job Output Name on System
+####################################
+export pgmout="OUTPUT.$$"
+touch $DATA/$pgmout
+
+####################################
+# SENDCOM  - Copy Files From TMPDIR to $COMOUT
+# SENDDBN  - Issue DBNet Client Calls
+####################################
+export SENDCOM=${SENDCOM:-YES}
+export SENDDBN=${SENDDBN:-YES}
+export SENDDBN_GB2=${SENDDBN_GB2:-YES}
+
+####################################
+# Specify Execution Areas
+####################################
+export EXECcdas=${HOMEcdas}/exec
+export FIXcdas=${HOMEcdas}/fix
+export USHcdas=${HOMEcdas}/ush
+export PARMcdas=${HOMEcdas}/parm
+
+##############################
+# Run setpdy and initialize PDY variables
+#
+# After this block of code, PDY and cyc define the
+# date code of the analysis to produce.
+#
+# OLD Code on AIX/Phase 1
+#
+#   for the 00Z cycles:
+#     if PDY is undefined, set to current PDY of the 00Z cycle
+#     PDY is reduced by 1 day
+#
+#   for the 06Z
+#     current PDY can move into the next day
+#     if PDY is undefined, set to current PDY of the 12Z cycle
+#     PDY is reduced by 1 day
+#
+#   for the 12Z cycles:
+#     if PDY is undefined, set to current PDY of the 12Z cycle
+#     PDY is reduced by 1 day
+#
+#   for the 18Z cycles:
+#       With a very late cutoff, it is possible for the 18Z cycle
+#       to move into the next day if production is running late
+#     if PDY is undefined, set to current PDY of the 00Z cycle (future?)
+#     PDY is reduced by 2 days
+#
+#
+# NEW Code on DELL
+#
+# if PDY is defined
+#     use as is
+#     make analysis for $PDY$cyc
+# IF PDY is undefined
+#     use old code
+##############################
+
+if [ "$PDY" = "" ] ; then
+   if test "$cyc" = "06"
+   then
+
+#     With a very late cutoff, it is possible for the 06Z cycle
+#     to move into the next day if production is running late -
+#     to ensure that the YYYYMMDD are correct, use the /com/date/t12z
+#     file for our PDY
+
+      export cycle=t12z
+      setpdy.sh
+      . ./PDY
+      export cycle=t06z
+      setpdy.sh
+      . ./PDY
+
+   elif test "$cyc" = "18"
+   then
+
+#     With a very late cutoff, it is possible for the 18Z cycle
+#     to move into the next day if production is running late -
+#     to ensure that the YYYYMMDD are correct, use the /com/date/t00z
+#     file to make PDY then backdate this PDY by 24-hours to get our PDY
+
+      export cycle=t00z
+      setpdy.sh
+      . ./PDY
+      PDY=$PDYm1
+
+      setpdy.sh
+      . ./PDY
+      export cycle=t18z
+      setpdy.sh
+      . ./PDY
+
+   else
+
+#     At 00 and 12Z, there should never be a problem
+      setpdy.sh
+      . ./PDY
+   fi
+
+#     Finally, backdate our PDY by 24-hours since model runs 1-day behind
+   PDY=$PDYm1
+   setpdy.sh
+   . ./PDY
+
+fi
+
+archdate=`echo $PDY | cut -c1-6`
+export PDYm6hr=`$NDATE -6 $PDY$cyc|cut -c1-8`
+export cycm6hr=`$NDATE -6 $PDY$cyc|cut -c9-10`
+export PDYp6hr=`$NDATE +6 $PDY$cyc|cut -c1-8`
+export cycp6hr=`$NDATE +6 $PDY$cyc|cut -c9-10`
+
+##############################################
+# Define COM directories
+##############################################
+export COMIN=${COMIN:-$(compath.py ${NET}/${cdas_ver})/${RUN}.${PDY}}
+export COMOUT=${COMOUT:-$(compath.py -o ${NET}/${cdas_ver})/${RUN}.${PDY}}
+export COMarkv=${COMarkv:-$(compath.py ${NET}/${cdas_ver}/${RUN}).`echo $PDY | cut -c1-6`}
+export COMINobsproc=${COMINobsproc:-$(compath.py obsproc/${obsproc_ver})/${RUN}.${PDY}}
+
+# COMINm6hr is the location of first guess
+export COMINm6hr=${COMINm6hr:-$(compath.py ${NET}/${cdas_ver})/${RUN}.${PDYm6hr}}
+
+# location of SST
+export COM_SST=${COM_SST:-$(compath.py nsst/${nsst_ver}/nsst)}
+
+# location of afwa snow
+export DCOM_SNOW=${DCOM_SNOW_ICE:-$DCOMROOT}
+
+# location of sea ice
+export COM_SICE=${COM_SICE:-$(compath.py seaice_analysis/${seaice_analysis_ver})/seaice_analysis}
+
+[ ! -d $COMOUT ] && mkdir -m 775 -p $COMOUT
+[ ! -d $COMarkv ] && mkdir -m 775 -p $COMarkv
+
+#############################################################
+# execute the script
+$HOMEcdas/scripts/excdas_forecast.sh
+err=$?
+if [ $err -ne 0 ] ; then
+   cat $pgmout
+   msg="ENDED ABNORMALLY."
+   postmsg "$msg"
+   exit 8
+fi
+#############################################################
+
+#
+# Copy dump data to arkv directory
+#
+
+# cp $LSB_OUTPUTFILE ${COMarkv}/fcst${PDY}${cyc}.out
+
+###################################################
+# msg end of job and clean up temperary directory
+###################################################
+cat $pgmout
+msg="ENDED NORMALLY."
+postmsg "$msg"
+date
+
+cd $DATAROOT
+if [ "$KEEPDATA" != YES ]; then rm -rf $DATA; fi
+exit 0

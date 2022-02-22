@@ -1,0 +1,14 @@
+Build instructions
+1. cd to the sorc directory
+2. load modules
+     module purge
+     . ../versions/load_modules.sh ../versions/build.ver 
+3. to build all the executables
+     make clean
+     make
+4. to make an individual executable (not library)
+     do 1, 2
+     cd to appropriate directory
+     make clean
+     make
+     cp (excutable name) ../../exec 
